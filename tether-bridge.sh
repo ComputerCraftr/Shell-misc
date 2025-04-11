@@ -14,7 +14,7 @@ fi
 if [ -f /etc/.tether-env.conf ]; then
     . /etc/.tether-env.conf
 else
-    echo "Warning: tether-env.conf not found. Proceeding with default values." >&2
+    echo "Warning: /etc/.tether-env.conf not found. Proceeding with default values." >&2
 fi
 
 # Set defaults in case values aren't provided.
@@ -24,11 +24,11 @@ fi
 
 # Ensure the webhook URL is defined.
 if [ -z "${WEBHOOK_URL:-}" ]; then
-    echo "Error: WEBHOOK_URL is not defined in tether-env.conf." >&2
+    echo "Error: WEBHOOK_URL is not defined in /etc/.tether-env.conf." >&2
     exit 1
 fi
 
-# Add the tethered interface to the bridge if not already added.
+# Add the tethered interface to the bridge if necessary.
 if ! ifconfig "$BRIDGE" | grep -q "$INTERFACE"; then
     ifconfig "$BRIDGE" addm "$INTERFACE"
 fi
@@ -39,16 +39,9 @@ ifconfig "$INTERFACE" up
 # Bring up the bridge explicitly (if not already up).
 ifconfig "$BRIDGE" up
 
-# Restart dhclient service to acquire new IP address.
-echo "Restarting dhclient service to acquire IP address..."
+# Restart the DHCP client service for the bridge to force a DHCP lease renewal.
+echo "Restarting dhclient service on ${BRIDGE}..."
 service dhclient restart "$BRIDGE" || true
-
-# Restart routing service to update default routes.
-echo "Restarting routing service to update routes..."
-service routing restart || true
-
-# Wait for a few seconds to allow the network config to settle.
-sleep 3
 
 # Fetch the IPv4 address from the bridge.
 IP=$(ifconfig "$BRIDGE" | awk '/inet / { print $2 }')
