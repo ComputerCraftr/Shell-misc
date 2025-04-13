@@ -1,9 +1,33 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # /usr/local/bin/tether-bridge.sh
 
+# Environment variables
 CURL="/usr/local/bin/curl"
-TIMEOUT=60 # total time to wait in seconds
-INTERVAL=1 # poll interval in seconds
+TIMEOUT=120 # total time to wait in seconds for a DHCP IP address
+INTERVAL=1  # poll interval in seconds
+
+# Retry settings.
+RETRY_COUNT=${RETRY_COUNT:-0}
+MAX_RETRIES=10
+
+# Function to handle errors and decide whether to retry.
+handle_error() {
+    lineno="$1"
+    echo "Error encountered at line ${lineno}. Attempt ${RETRY_COUNT} of ${MAX_RETRIES}."
+    if [ "${RETRY_COUNT}" -lt "${MAX_RETRIES}" ]; then
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+        echo "Retrying in 2 seconds... (Retry ${RETRY_COUNT} of ${MAX_RETRIES})"
+        sleep 2
+        # Re-executes the script with the current arguments.
+        exec "$0" "$@"
+    else
+        echo "Maximum retries reached. Exiting." >&2
+        exit 1
+    fi
+}
+
+# Trap any error (nonzero exit status) and call handle_error.
+trap 'handle_error $LINENO' ERR
 
 # Exit on errors and undefined variables.
 set -eu
@@ -42,7 +66,7 @@ ifconfig "$INTERFACE" up
 
 # Restart the DHCP client service for the bridge to force a DHCP lease renewal.
 echo "Restarting dhclient service on ${BRIDGE}..."
-service dhclient restart "$BRIDGE" || true
+service dhclient restart "$BRIDGE"
 
 # Poll for an IP address (both IPv4 and IPv6) with a timeout.
 echo "Polling for IPv4 and IPv6 addresses on ${BRIDGE}..."
@@ -80,7 +104,7 @@ fi
 
 # Send a Discord webhook message if an address was acquired.
 echo "Sending Discord notification with IP info: $IP_INFO"
-if ! $CURL -s -X POST -H "Content-Type: application/json" \
+if ! "$CURL" -s -X POST -H "Content-Type: application/json" \
     -d "{\"content\": \"${DISCORD_MENTION} Tethered via ${INTERFACE}: ${BRIDGE} acquired ${IP_INFO}\"}" \
     "$WEBHOOK_URL"; then
     echo "Error: Failed to send Discord notification." >&2
