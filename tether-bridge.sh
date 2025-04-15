@@ -71,7 +71,7 @@ trap 'handle_error $LINENO' ERR
 
 # Load environment variables from /etc/.tether-env.conf if it exists.
 if [ -f /etc/.tether-env.conf ]; then
-    source /etc/.tether-env.conf
+    source /etc/.tether-env.conf || false
 else
     echo "Warning: /etc/.tether-env.conf not found, proceeding with default values."
 fi
