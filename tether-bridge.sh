@@ -1,27 +1,67 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # /usr/local/bin/tether-bridge.sh
 
-# Environment variables
-CURL="/usr/local/bin/curl"
-TIMEOUT=120 # total time to wait in seconds for a DHCP IP address
-INTERVAL=1  # poll interval in seconds
+# If not running under full Bash mode (or if in POSIX compatibility mode), re-execute using full Bash.
+if [ -z "${BASH_VERSION:-}" ]; then
+    # Ensure a good PATH so that bash and related tools are found.
+    export PATH="/usr/local/bin:/usr/bin:/bin:/sbin:/usr/local/sbin"
+    BASH_PATH=$(command -v bash)
+    if [ -z "$BASH_PATH" ]; then
+        logger -t tether-bridge -p daemon.err "bash not found in PATH, cannot run script"
+        exit 1
+    fi
+    exec "$BASH_PATH" "$0" "$@"
+fi
 
-# Retry settings.
+# Disable POSIX mode (if it was enabled) so that Bash-specific features become available.
+set +o posix
+
+# Redirect all stdout and stderr to syslog (for devd visibility).
+exec 1> >(logger -t tether-bridge -p daemon.notice) 2> >(logger -t tether-bridge -p daemon.err)
+
+# Enable strict error handling.
+set -euo pipefail
+IFS=$'\n\t'
+
+# Ensure the script is run as root.
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Error: This script must be run as root. Exiting."
+    exit 1
+fi
+
+# Configuration: timeouts, intervals, and retry settings.
+TIMEOUT=120    # Total seconds to wait for an IP address.
+INTERVAL=1     # Polling interval in seconds.
+MAX_RETRIES=10 # Maximum number of retries.
 RETRY_COUNT=${RETRY_COUNT:-0}
-MAX_RETRIES=10
 
-# Function to handle errors and decide whether to retry.
+# Dynamically determine the location of curl.
+CURL=$(command -v curl)
+if [ -z "$CURL" ]; then
+    echo "Error: curl not found in PATH, exiting."
+    exit 1
+fi
+
+# The interface name is provided as the first argument (from devd).
+if [ -z "${INTERFACE:-}" ] && [ "$#" -gt 0 ]; then
+    export INTERFACE="$1"
+elif [ "$#" -gt 0 ]; then
+    echo "Warning: INTERFACE is already set to '${INTERFACE:-}'. Ignoring argument '$1'."
+else
+    echo "Error: INTERFACE is not set and no argument was provided. Exiting."
+    exit 1
+fi
+
+# Error handler: log a message and, if under MAX_RETRIES, re-executes the script with the original "$@".
 handle_error() {
-    lineno="$1"
-    echo "Error encountered at line ${lineno}. Attempt ${RETRY_COUNT} of ${MAX_RETRIES}."
-    if [ "${RETRY_COUNT}" -lt "${MAX_RETRIES}" ]; then
-        RETRY_COUNT=$((RETRY_COUNT + 1))
-        echo "Retrying in 2 seconds... (Retry ${RETRY_COUNT} of ${MAX_RETRIES})"
+    echo "Error encountered at line $1 (retry $RETRY_COUNT of $MAX_RETRIES)"
+    if [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; then
+        export RETRY_COUNT=$((RETRY_COUNT + 1))
+        echo "Retrying in 2 seconds... (Retry $RETRY_COUNT of $MAX_RETRIES)"
         sleep 2
-        # Re-executes the script with the current arguments.
-        exec "$0" "$@"
+        exec "$0" "$INTERFACE"
     else
-        echo "Maximum retries reached. Exiting." >&2
+        echo "Maximum retries reached. Exiting."
         exit 1
     fi
 }
@@ -29,54 +69,53 @@ handle_error() {
 # Trap any error (nonzero exit status) and call handle_error.
 trap 'handle_error $LINENO' ERR
 
-# Exit on errors and undefined variables.
-set -eu
-
-# Ensure the script is run as root.
-if [ "$(id -u)" -ne 0 ]; then
-    echo "Error: This script must be run as root. Please use sudo or run as root." >&2
-    exit 1
-fi
-
-# Source the environment file if it exists.
+# Load environment variables from /etc/.tether-env.conf if it exists.
 if [ -f /etc/.tether-env.conf ]; then
-    . /etc/.tether-env.conf
+    source /etc/.tether-env.conf
 else
-    echo "Warning: /etc/.tether-env.conf not found. Proceeding with default values." >&2
+    echo "Warning: /etc/.tether-env.conf not found, proceeding with default values."
 fi
 
-# Set defaults in case values aren't provided.
-: "${INTERFACE:=ue0}"
+# Set defaults for the bridge and Discord notification if not defined.
 : "${BRIDGE:=bridge0}"
 : "${DISCORD_MENTION:=@everyone}"
 
 # Ensure the webhook URL is defined.
 if [ -z "${WEBHOOK_URL:-}" ]; then
-    echo "Error: WEBHOOK_URL is not defined in /etc/.tether-env.conf." >&2
+    echo "Error: WEBHOOK_URL must be set in /etc/.tether-env.conf."
     exit 1
 fi
 
-# Add the tethered interface to the bridge if necessary.
-if ! ifconfig "$BRIDGE" | grep -q "$INTERFACE"; then
-    ifconfig "$BRIDGE" addm "$INTERFACE"
+echo "Starting tether bridge setup for interface: $INTERFACE into bridge: $BRIDGE"
+
+# Verify the specified interface exists.
+if ! ifconfig "$INTERFACE" >/dev/null 2>&1; then
+    echo "Error: Interface $INTERFACE does not exist. Exiting."
+    exit 1
 fi
 
-# Bring up the new interface explicitly.
+# Add the interface to the bridge if it's not already a member.
+if ! ifconfig "$BRIDGE" | grep -qw "$INTERFACE"; then
+    ifconfig "$BRIDGE" addm "$INTERFACE"
+    echo "Added interface $INTERFACE to bridge $BRIDGE"
+else
+    echo "Interface $INTERFACE is already a member of bridge $BRIDGE"
+fi
+
+# Bring the interface up.
 ifconfig "$INTERFACE" up
 
-# Restart the DHCP client service for the bridge to force a DHCP lease renewal.
-echo "Restarting dhclient service on ${BRIDGE}..."
+# Restart the DHCP client service on the bridge.
+echo "Restarting DHCP client on bridge $BRIDGE..."
 service dhclient restart "$BRIDGE"
 
-# Poll for an IP address (both IPv4 and IPv6) with a timeout.
-echo "Polling for IPv4 and IPv6 addresses on ${BRIDGE}..."
+# Poll for an IPv4 or non-link-local IPv6 address on the bridge.
 SECONDS_WAITED=0
 IPV4=""
 IPV6=""
+
 while [ "$SECONDS_WAITED" -lt "$TIMEOUT" ]; do
-    # Get the first IPv4 address (skip IPv6)
     IPV4=$(ifconfig "$BRIDGE" | awk '/inet / { print $2; exit }')
-    # Get the first non-link-local IPv6 address (if any)
     IPV6=$(ifconfig "$BRIDGE" | awk '/inet6 / && $2 !~ /^fe80/ { print $2; exit }')
     if [ -n "$IPV4" ] || [ -n "$IPV6" ]; then
         break
@@ -86,29 +125,19 @@ while [ "$SECONDS_WAITED" -lt "$TIMEOUT" ]; do
 done
 
 if [ -z "$IPV4" ] && [ -z "$IPV6" ]; then
-    echo "Error: No IPv4 or IPv6 address acquired on ${BRIDGE} after ${TIMEOUT} seconds." >&2
+    echo "Error: Failed to acquire an IP address on bridge $BRIDGE after $TIMEOUT seconds."
     exit 1
 fi
 
-# Build the IP info string for the Discord message.
+# Build the IP information string for the Discord message.
 IP_INFO=""
-if [ -n "$IPV4" ]; then
-    IP_INFO="IPv4: \`${IPV4}\`"
-fi
-if [ -n "$IPV6" ]; then
-    if [ -n "$IP_INFO" ]; then
-        IP_INFO="$IP_INFO, "
-    fi
-    IP_INFO="${IP_INFO}IPv6: \`${IPV6}\`"
-fi
+[ -n "$IPV4" ] && IP_INFO="IPv4: \`$IPV4\`"
+[ -n "$IPV6" ] && IP_INFO="${IP_INFO:+$IP_INFO, }IPv6: \`$IPV6\`"
 
-# Send a Discord webhook message if an address was acquired.
+# Send the Discord notification.
 echo "Sending Discord notification with IP info: $IP_INFO"
-if ! "$CURL" -s -X POST -H "Content-Type: application/json" \
+"$CURL" -s -X POST -H "Content-Type: application/json" \
     -d "{\"content\": \"${DISCORD_MENTION} Tethered via ${INTERFACE}: ${BRIDGE} acquired ${IP_INFO}\"}" \
-    "$WEBHOOK_URL"; then
-    echo "Error: Failed to send Discord notification." >&2
-    exit 1
-fi
+    "$WEBHOOK_URL"
 
 echo "Notification sent successfully."
