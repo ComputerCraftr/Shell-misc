@@ -4,7 +4,7 @@
 # If not running under full Bash mode (or if in POSIX compatibility mode), re-execute using full Bash.
 if [ -z "${BASH_VERSION:-}" ]; then
     # Ensure a good PATH so that bash and related tools are found.
-    export PATH="/usr/local/bin:/usr/bin:/bin:/sbin:/usr/local/sbin"
+    export PATH="/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin:/usr/local/sbin"
     BASH_PATH=$(command -v bash)
     if [ -z "$BASH_PATH" ]; then
         logger -t tether-bridge -p daemon.err "bash not found in PATH, cannot run script"
