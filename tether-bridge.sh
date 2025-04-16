@@ -7,7 +7,7 @@ if [ -z "${BASH_VERSION:-}" ]; then
     export PATH="/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin:/usr/local/sbin"
     BASH_PATH=$(command -v bash)
     if [ -z "$BASH_PATH" ]; then
-        logger -t tether-bridge -p daemon.err "bash not found in PATH, cannot run script"
+        logger -t tether-bridge -p daemon.err "bash not found in PATH, cannot run script."
         exit 1
     fi
     exec "$BASH_PATH" "$0" "$@"
@@ -38,7 +38,7 @@ RETRY_COUNT=${RETRY_COUNT:-0}
 # Dynamically determine the location of curl.
 CURL=$(command -v curl)
 if [ -z "$CURL" ]; then
-    echo "Error: curl not found in PATH, exiting."
+    echo "Error: curl not found in PATH. Exiting."
     exit 1
 fi
 
@@ -88,10 +88,10 @@ fi
 
 echo "Starting tether bridge setup for interface: $INTERFACE into bridge: $BRIDGE"
 
-# Verify the specified interface exists.
+# Verify the specified interface exists. Sometimes it isn't available immediately.
 if ! ifconfig "$INTERFACE" >/dev/null 2>&1; then
-    echo "Error: Interface $INTERFACE does not exist. Exiting."
-    exit 1
+    echo "Error: Interface $INTERFACE does not exist."
+    false
 fi
 
 # Add the interface to the bridge if it's not already a member.
@@ -126,7 +126,7 @@ done
 
 if [ -z "$IPV4" ] && [ -z "$IPV6" ]; then
     echo "Error: Failed to acquire an IP address on bridge $BRIDGE after $TIMEOUT seconds."
-    exit 1
+    false
 fi
 
 # Build the IP information string for the Discord message.
