@@ -71,6 +71,7 @@ trap 'handle_error $LINENO' ERR
 
 # Load environment variables from /etc/.tether-env.conf if it exists.
 if [ -f /etc/.tether-env.conf ]; then
+    # Using "source ... || false" to ensure a failure can be caught for retries.
     source /etc/.tether-env.conf || false
 else
     echo "Warning: /etc/.tether-env.conf not found, proceeding with default values."
@@ -129,15 +130,44 @@ if [ -z "$IPV4" ] && [ -z "$IPV6" ]; then
     false
 fi
 
-# Build the IP information string for the Discord message.
+# Poll for default gateways for IPv4 and IPv6 (using netstat)
+GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
+GATEWAY_WAITED=0
+DEFAULT_GW_IPV4=""
+DEFAULT_GW_IPV6=""
+
+while [ "$GATEWAY_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
+    # For IPv4, extract the default gateway from netstat.
+    DEFAULT_GW_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $2; exit}')
+    # For IPv6, extract the default gateway from netstat (ignoring link-local).
+    DEFAULT_GW_IPV6=$(netstat -rn -f inet6 2>/dev/null | awk '$1 == "default" {print $2; exit}')
+    if [ -n "$DEFAULT_GW_IPV4" ] || [ -n "$DEFAULT_GW_IPV6" ]; then
+        break
+    fi
+    sleep 1
+    GATEWAY_WAITED=$((GATEWAY_WAITED + 1))
+done
+
+# Build the IP information string.
 IP_INFO=""
 [ -n "$IPV4" ] && IP_INFO="IPv4: \`$IPV4\`"
 [ -n "$IPV6" ] && IP_INFO="${IP_INFO:+$IP_INFO, }IPv6: \`$IPV6\`"
 
+# Build the default gateway information string.
+GW_INFO=""
+[ -n "$DEFAULT_GW_IPV4" ] && GW_INFO="IPv4 Gateway: \`$DEFAULT_GW_IPV4\`"
+[ -n "$DEFAULT_GW_IPV6" ] && GW_INFO="${GW_INFO:+$GW_INFO, }IPv6 Gateway: \`$DEFAULT_GW_IPV6\`"
+
+# Combine both IP and gateway info into one message.
+DISCORD_MESSAGE="Tethered via ${INTERFACE}: ${BRIDGE} acquired ${IP_INFO}"
+if [ -n "$GW_INFO" ]; then
+    DISCORD_MESSAGE="${DISCORD_MESSAGE} with ${GW_INFO}"
+fi
+
 # Send the Discord notification.
-echo "Sending Discord notification with IP info: $IP_INFO"
+echo "Sending Discord notification with the following message: $DISCORD_MESSAGE"
 "$CURL" -s -X POST -H "Content-Type: application/json" \
-    -d "{\"content\": \"${DISCORD_MENTION} Tethered via ${INTERFACE}: ${BRIDGE} acquired ${IP_INFO}\"}" \
+    -d "{\"content\": \"${DISCORD_MENTION} ${DISCORD_MESSAGE}\"}" \
     "$WEBHOOK_URL"
 
 echo "Notification sent successfully."
