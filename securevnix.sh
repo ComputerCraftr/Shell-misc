@@ -2,13 +2,14 @@
 
 set -eu
 
-sudo xbps-install -Syu ufw nftables iptables-nft cryptsetup google-authenticator-libpam libqrencode spectre-meltdown-checker lynis linux-firmware socklog-void cronie
+sudo xbps-install -Syu ufw nftables iptables-nft cryptsetup google-authenticator-libpam libqrencode spectre-meltdown-checker lynis linux-firmware socklog-void cronie chrony
 sudo xbps-alternatives -s iptables-nft
 
 sudo ln -sf /etc/sv/ufw /var/service
 sudo ln -sf /etc/sv/socklog-unix /var/service
 sudo ln -sf /etc/sv/nanoklogd /var/service
 sudo ln -sf /etc/sv/cronie /var/service
+sudo ln -sf /etc/sv/chronyd /var/service
 
 mkdir -p ~/.ssh
 chmod 700 ~/.ssh
