@@ -30,9 +30,10 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # Configuration: timeouts, intervals, and retry settings.
-TIMEOUT=120    # Total seconds to wait for an IP address.
-INTERVAL=1     # Polling interval in seconds.
-MAX_RETRIES=10 # Maximum number of retries.
+IP_TIMEOUT=120     # Total seconds to wait for an IP address.
+GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
+INTERVAL=1         # Polling interval in seconds.
+MAX_RETRIES=10     # Maximum number of retries.
 RETRY_COUNT=${RETRY_COUNT:-0}
 
 # Dynamically determine the location of curl.
@@ -115,9 +116,9 @@ SECONDS_WAITED=0
 IPV4=""
 IPV6=""
 
-while [ "$SECONDS_WAITED" -lt "$TIMEOUT" ]; do
-    IPV4=$(ifconfig "$BRIDGE" | awk '/inet / { print $2; exit }')
-    IPV6=$(ifconfig "$BRIDGE" | awk '/inet6 / && $2 !~ /^fe80/ { print $2; exit }')
+while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
+    IPV4=$(ifconfig "$BRIDGE" | awk '/inet / {print $2; exit}')
+    IPV6=$(ifconfig "$BRIDGE" | awk '/inet6 / && $2 !~ /^fe80/ {print $2; exit}')
     if [ -n "$IPV4" ] || [ -n "$IPV6" ]; then
         break
     fi
@@ -126,17 +127,16 @@ while [ "$SECONDS_WAITED" -lt "$TIMEOUT" ]; do
 done
 
 if [ -z "$IPV4" ] && [ -z "$IPV6" ]; then
-    echo "Error: Failed to acquire an IP address on bridge $BRIDGE after $TIMEOUT seconds."
+    echo "Error: Failed to acquire an IP address on bridge $BRIDGE after $IP_TIMEOUT seconds."
     false
 fi
 
 # Poll for default gateways for IPv4 and IPv6 (using netstat)
-GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
-GATEWAY_WAITED=0
+SECONDS_WAITED=0
 DEFAULT_GW_IPV4=""
 DEFAULT_GW_IPV6=""
 
-while [ "$GATEWAY_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
+while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
     # For IPv4, extract the default gateway from netstat.
     DEFAULT_GW_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $2; exit}')
     # For IPv6, extract the default gateway from netstat (ignoring link-local).
@@ -144,8 +144,8 @@ while [ "$GATEWAY_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
     if [ -n "$DEFAULT_GW_IPV4" ] || [ -n "$DEFAULT_GW_IPV6" ]; then
         break
     fi
-    sleep 1
-    GATEWAY_WAITED=$((GATEWAY_WAITED + 1))
+    sleep "$INTERVAL"
+    SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
 done
 
 # Build the IP information string.
