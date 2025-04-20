@@ -149,17 +149,15 @@ while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
 done
 
 # Build the IP information string.
-DISCORD_MESSAGE="Tethered via \`${INTERFACE}\` into \`${BRIDGE}\`, acquired IP address(es):\n\`\`\`"
-[ -n "$IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\nIPv4: $IPV4"
-[ -n "$IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\nIPv6: $IPV6"
-DISCORD_MESSAGE="${DISCORD_MESSAGE}\n\`\`\`"
+DISCORD_MESSAGE="Tethered via \`${INTERFACE}\` into \`${BRIDGE}\`, acquired IP address(es):"
+[ -n "$IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\n\`\`\`$IPV4\`\`\`"
+[ -n "$IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\n\`\`\`$IPV6\`\`\`"
 
 # Build the default gateway information string.
 if [ -n "$DEFAULT_GW_IPV4" ] || [ -n "$DEFAULT_GW_IPV6" ]; then
-    DISCORD_MESSAGE="${DISCORD_MESSAGE}\nDefault Gateway(s):\n\`\`\`"
-    [ -n "$DEFAULT_GW_IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\nIPv4 Gateway: $DEFAULT_GW_IPV4"
-    [ -n "$DEFAULT_GW_IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\nIPv6 Gateway: $DEFAULT_GW_IPV6"
-    DISCORD_MESSAGE="${DISCORD_MESSAGE}\n\`\`\`"
+    DISCORD_MESSAGE="${DISCORD_MESSAGE}\nDefault Gateway(s):"
+    [ -n "$DEFAULT_GW_IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\n\`\`\`$DEFAULT_GW_IPV4\`\`\`"
+    [ -n "$DEFAULT_GW_IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\n\`\`\`$DEFAULT_GW_IPV6\`\`\`"
 fi
 
 # Send the Discord notification.
