@@ -70,12 +70,12 @@ handle_error() {
 # Trap any error (nonzero exit status) and call handle_error.
 trap 'handle_error $LINENO' ERR
 
-# Load environment variables from /etc/.tether-env.conf if it exists.
-if [ -f /etc/.tether-env.conf ]; then
+# Load environment variables from /usr/local/etc/.tether-env.conf if it exists.
+if [ -f /usr/local/etc/.tether-env.conf ]; then
     # Using "source ... || false" to ensure a failure can be caught for retries.
-    source /etc/.tether-env.conf || false
+    source /usr/local/etc/.tether-env.conf || false
 else
-    echo "Warning: /etc/.tether-env.conf not found, proceeding with default values."
+    echo "Warning: /usr/local/etc/.tether-env.conf not found, proceeding with default values."
 fi
 
 # Set defaults for the bridge and Discord notification if not defined.
@@ -84,7 +84,7 @@ fi
 
 # Ensure the webhook URL is defined.
 if [ -z "${WEBHOOK_URL:-}" ]; then
-    echo "Error: WEBHOOK_URL must be set in /etc/.tether-env.conf."
+    echo "Error: WEBHOOK_URL must be set in /usr/local/etc/.tether-env.conf."
     exit 1
 fi
 
