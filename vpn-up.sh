@@ -34,7 +34,7 @@ OVPN_TEMPL=/usr/local/etc/openvpn/pia_template.ovpn
 OVPN_FILE=/usr/local/etc/openvpn/pia.ovpn
 OVPN_AUTH=/usr/local/etc/openvpn/.vpn-creds
 OVPN_PROXY_AUTH=/usr/local/etc/openvpn/.proxy-creds
-OVPN_PROXY_PORT=$(tail -n 1 /usr/local/etc/openvpn/.proxy-creds)
+OVPN_PROXY_PORT=$(tail -n 1 "$OVPN_PROXY_AUTH" || echo 0)
 IP_TIMEOUT=120     # Total seconds to wait for an IP address.
 GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
@@ -58,9 +58,9 @@ else
     exit 1
 fi
 
-# Ensure the OpenVPN template file exists.
-if [ ! -f "$OVPN_TEMPL" ]; then
-    echo "Error: OpenVPN template file $OVPN_TEMPL does not exist."
+# Ensure the OpenVPN files exist.
+if [ ! -f "$OVPN_TEMPL" ] || [ ! -f "$OVPN_AUTH" ] || [ ! -f "$OVPN_PROXY_AUTH" ]; then
+    echo "Error: OpenVPN config files are missing."
     exit 1
 fi
 
