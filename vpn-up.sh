@@ -35,6 +35,7 @@ OVPN_FILE=/usr/local/etc/openvpn/pia.ovpn
 OVPN_AUTH=/usr/local/etc/openvpn/.vpn-creds
 OVPN_PROXY_AUTH=/usr/local/etc/openvpn/.proxy-creds
 OVPN_PROXY_PORT=$(tail -n 1 "$OVPN_PROXY_AUTH" || echo 0)
+OVPN_INTERFACE=$(awk '/dev / {print $2; exit}' <"$OVPN_TEMPL")
 IP_TIMEOUT=120     # Total seconds to wait for an IP address.
 GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
@@ -179,15 +180,24 @@ if [ -n "$DEFAULT_GW_IPV4" ] || [ -n "$DEFAULT_GW_IPV6" ]; then
     [ -n "$DEFAULT_GW_IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV6\`\`\`"
 fi
 
+# Poll for an IPv4 address on the tunnel interface.
+while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
+    if ifconfig "$OVPN_INTERFACE" | grep -qwF 'inet'; then
+        break
+    fi
+    sleep "$INTERVAL"
+    SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
+done
+
 # Build the external IP information string.
-EXT_IP=$("$CURL" https://ifconfig.me 2>/dev/null || true)
+EXT_IP=$("$CURL" -s --retry 5 --retry-delay 5 https://ifconfig.me || true)
 if [ -n "$EXT_IP" ]; then
     DISCORD_MESSAGE="${DISCORD_MESSAGE}\nExternal IP:\`\`\`$EXT_IP\`\`\`"
 fi
 
 # Send the Discord notification.
 echo "Sending Discord notification with the following message: $DISCORD_MESSAGE"
-"$CURL" -s -X POST -H "Content-Type: application/json" \
+"$CURL" -s --retry 5 --retry-delay 5 -X POST -H "Content-Type: application/json" \
     -d "{\"content\": \"${DISCORD_MENTION} ${DISCORD_MESSAGE}\"}" \
     "$WEBHOOK_URL"
 
