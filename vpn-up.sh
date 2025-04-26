@@ -32,7 +32,9 @@ fi
 # Configuration: timeouts, intervals, and retry settings.
 OVPN_TEMPL=/usr/local/etc/openvpn/pia_template.ovpn
 OVPN_FILE=/usr/local/etc/openvpn/pia.ovpn
-OVPN_PROXY_PORT=1080
+OVPN_AUTH=/usr/local/etc/openvpn/.vpn-creds
+OVPN_PROXY_AUTH=/usr/local/etc/openvpn/.proxy-creds
+OVPN_PROXY_PORT=$(tail -n 1 /usr/local/etc/openvpn/.proxy-creds)
 IP_TIMEOUT=120     # Total seconds to wait for an IP address.
 GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
@@ -154,7 +156,9 @@ if [ -z "$DEFAULT_GW_IPV4" ]; then
 fi
 
 # Update the OpenVPN configuration.
-sed -e "s|__PROXY_STRING__|${DEFAULT_GW_IPV4} ${OVPN_PROXY_PORT}|" \
+sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
+    -e "s|__PROXY_STRING__|${DEFAULT_GW_IPV4} ${OVPN_PROXY_PORT}|" \
+    -e "s|__PROXY_AUTH_FILE__|$OVPN_PROXY_AUTH|" \
     "$OVPN_TEMPL" >"$OVPN_FILE"
 
 # Restart ipfw, OpenVPN, and DHCP services.
