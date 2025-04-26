@@ -70,12 +70,12 @@ handle_error() {
 # Trap any error (nonzero exit status) and call handle_error.
 trap 'handle_error $LINENO' ERR
 
-# Load environment variables from /usr/local/etc/.tether-env.conf if it exists.
-if [ -f /usr/local/etc/.tether-env.conf ]; then
+# Load environment variables from /usr/local/etc/.gateway-env.conf if it exists.
+if [ -f /usr/local/etc/.gateway-env.conf ]; then
     # Using "source ... || false" to ensure a failure can be caught for retries.
-    source /usr/local/etc/.tether-env.conf || false
+    source /usr/local/etc/.gateway-env.conf || false
 else
-    echo "Warning: /usr/local/etc/.tether-env.conf not found, proceeding with default values."
+    echo "Warning: /usr/local/etc/.gateway-env.conf not found, proceeding with default values."
 fi
 
 # Set defaults for the bridge and Discord notification if not defined.
@@ -84,7 +84,7 @@ fi
 
 # Ensure the webhook URL is defined.
 if [ -z "${WEBHOOK_URL:-}" ]; then
-    echo "Error: WEBHOOK_URL must be set in /usr/local/etc/.tether-env.conf."
+    echo "Error: WEBHOOK_URL must be set in /usr/local/etc/.gateway-env.conf."
     exit 1
 fi
 
@@ -148,16 +148,27 @@ while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
     SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
 done
 
+if [ -z "$DEFAULT_GW_IPV4" ] && [ -z "$DEFAULT_GW_IPV6" ]; then
+    echo "Error: Failed to acquire a default gateway on interface $INTERFACE after $GATEWAY_TIMEOUT seconds."
+    false
+fi
+
 # Build the IP information string.
 DISCORD_MESSAGE="Tethered via \`${INTERFACE}\` into \`${BRIDGE}\`, acquired IP address(es):"
-[ -n "$IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\n\`\`\`$IPV4\`\`\`"
-[ -n "$IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\n\`\`\`$IPV6\`\`\`"
+[ -n "$IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV4\`\`\`"
+[ -n "$IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV6\`\`\`"
 
 # Build the default gateway information string.
 if [ -n "$DEFAULT_GW_IPV4" ] || [ -n "$DEFAULT_GW_IPV6" ]; then
     DISCORD_MESSAGE="${DISCORD_MESSAGE}\nDefault Gateway(s):"
-    [ -n "$DEFAULT_GW_IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\n\`\`\`$DEFAULT_GW_IPV4\`\`\`"
-    [ -n "$DEFAULT_GW_IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\n\`\`\`$DEFAULT_GW_IPV6\`\`\`"
+    [ -n "$DEFAULT_GW_IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV4\`\`\`"
+    [ -n "$DEFAULT_GW_IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV6\`\`\`"
+fi
+
+# Build the external IP information string.
+EXT_IP=$("$CURL" https://ifconfig.me 2>/dev/null || true)
+if [ -n "$EXT_IP" ]; then
+    DISCORD_MESSAGE="${DISCORD_MESSAGE}\nExternal IP:\`\`\`$EXT_IP\`\`\`"
 fi
 
 # Send the Discord notification.

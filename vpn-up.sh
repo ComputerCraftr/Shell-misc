@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # /usr/local/bin/vpn-up.sh
 
 # If not running under full Bash mode (or if in POSIX compatibility mode), re-execute using full Bash.
@@ -148,6 +148,11 @@ while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
     SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
 done
 
+if [ -z "$DEFAULT_GW_IPV4" ]; then
+    echo "Error: Failed to acquire a default gateway on interface $INTERFACE after $GATEWAY_TIMEOUT seconds."
+    false
+fi
+
 # Update the OpenVPN configuration.
 sed -e "s|__PROXY_STRING__|${DEFAULT_GW_IPV4} ${OVPN_PROXY_PORT}|" \
     "$OVPN_TEMPL" >"$OVPN_FILE"
@@ -159,7 +164,7 @@ service openvpn restart
 service kea restart
 
 # Build the IP information string.
-DISCORD_MESSAGE="Tethered via \`${INTERFACE}\`, acquired IP address(es):"
+DISCORD_MESSAGE="\`${INTERFACE}\` is up, acquired IP address(es):"
 [ -n "$IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV4\`\`\`"
 [ -n "$IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV6\`\`\`"
 
