@@ -1,5 +1,6 @@
 #!/bin/sh
 # /usr/local/bin/vpn-up.sh
+SCRIPT_NAME=vpn-up
 
 # If not running under full Bash mode (or if in POSIX compatibility mode), re-execute using full Bash.
 if [ -z "${BASH_VERSION:-}" ]; then
@@ -7,24 +8,14 @@ if [ -z "${BASH_VERSION:-}" ]; then
     export PATH="/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin:/usr/local/sbin"
     BASH_PATH=$(command -v bash)
     if [ -z "$BASH_PATH" ]; then
-        logger -t vpn-up -p daemon.err "bash not found in PATH, cannot run script."
+        logger -t "$SCRIPT_NAME" -p daemon.err "bash not found in PATH, cannot run script."
         exit 1
     fi
     exec "$BASH_PATH" "$0" "$@"
 fi
 
-# Disable POSIX mode (if it was enabled) so that Bash-specific features become available.
+# Disable POSIX mode (if it was enabled) so that Bash-specific features and strict error handling become available.
 set +o posix
-
-# Configuration: check retry count.
-RETRY_COUNT=${RETRY_COUNT:-0}
-
-# On first execution, redirect all stdout and stderr to syslog (for devd visibility).
-if [ "$RETRY_COUNT" -eq 0 ]; then
-    exec 1> >(logger -t vpn-up -p daemon.notice) 2> >(logger -t vpn-up -p daemon.err)
-fi
-
-# Enable strict error handling.
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -32,6 +23,32 @@ IFS=$'\n\t'
 if [ "$(id -u)" -ne 0 ]; then
     echo "Error: This script must be run as root. Exiting."
     exit 1
+fi
+
+# Handle interface from either $INTERFACE (retry) or $1 (first run).
+if [ -n "${INTERFACE:-}" ]; then
+    # Already exported by a retry
+    if [ "$#" -gt 0 ] && [ "$1" != "$INTERFACE" ]; then
+        echo "Warning: INTERFACE is already set to '$INTERFACE'; ignoring argument '$1'."
+    fi
+elif [ "$#" -gt 0 ]; then
+    export INTERFACE="$1"
+else
+    echo "Error: INTERFACE is not set and no argument was provided. Exiting."
+    exit 1
+fi
+
+# Check if another instance is running.
+LOCKFILE="/var/run/${SCRIPT_NAME}.${INTERFACE}.lock"
+exec 9>"$LOCKFILE" || exit 1
+lockf -s -t 0 9 || exit 0
+trap 'exec 9>&-; rm -f "$LOCKFILE"' INT TERM EXIT
+
+# On first execution, redirect all stdout and stderr to syslog (for devd visibility).
+RETRY_COUNT=${RETRY_COUNT:-0}
+if [ "$RETRY_COUNT" -eq 0 ]; then
+    exec 1> >(logger -t "$SCRIPT_NAME" -p daemon.notice) \
+    2> >(logger -t "$SCRIPT_NAME" -p daemon.err)
 fi
 
 # Configuration: timeouts, intervals, and retry settings.
@@ -50,16 +67,6 @@ MAX_RETRIES=10     # Maximum number of retries.
 CURL=$(command -v curl)
 if [ -z "$CURL" ]; then
     echo "Error: curl not found in PATH. Exiting."
-    exit 1
-fi
-
-# The interface name is provided as the first argument (from devd).
-if [ -z "${INTERFACE:-}" ] && [ "$#" -gt 0 ]; then
-    export INTERFACE="$1"
-elif [ "$#" -gt 0 ]; then
-    echo "Warning: INTERFACE is already set to '${INTERFACE:-}'. Ignoring argument '$1'."
-else
-    echo "Error: INTERFACE is not set and no argument was provided. Exiting."
     exit 1
 fi
 
