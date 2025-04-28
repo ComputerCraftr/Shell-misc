@@ -16,8 +16,13 @@ fi
 # Disable POSIX mode (if it was enabled) so that Bash-specific features become available.
 set +o posix
 
-# Redirect all stdout and stderr to syslog (for devd visibility).
-exec 1> >(logger -t vpn-up -p daemon.notice) 2> >(logger -t vpn-up -p daemon.err)
+# Configuration: check retry count.
+RETRY_COUNT=${RETRY_COUNT:-0}
+
+# On first execution, redirect all stdout and stderr to syslog (for devd visibility).
+if [ "$RETRY_COUNT" -eq 0 ]; then
+    exec 1> >(logger -t vpn-up -p daemon.notice) 2> >(logger -t vpn-up -p daemon.err)
+fi
 
 # Enable strict error handling.
 set -euo pipefail
@@ -40,7 +45,6 @@ IP_TIMEOUT=120     # Total seconds to wait for an IP address.
 GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
 MAX_RETRIES=10     # Maximum number of retries.
-RETRY_COUNT=${RETRY_COUNT:-0}
 
 # Dynamically determine the location of curl.
 CURL=$(command -v curl)
