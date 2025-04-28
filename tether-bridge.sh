@@ -21,7 +21,7 @@ IFS=$'\n\t'
 
 # Ensure the script is run as root.
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Error: This script must be run as root. Exiting."
+    logger -t "$SCRIPT_NAME" -p daemon.err "Error: This script must be run as root. Exiting."
     exit 1
 fi
 
@@ -29,24 +29,26 @@ fi
 if [ -n "${INTERFACE:-}" ]; then
     # Already exported by a retry
     if [ "$#" -gt 0 ] && [ "$1" != "$INTERFACE" ]; then
-        echo "Warning: INTERFACE is already set to '$INTERFACE'; ignoring argument '$1'."
+        logger -t "$SCRIPT_NAME" -p daemon.notice "Warning: INTERFACE is already set to '$INTERFACE'; ignoring argument '$1'."
     fi
 elif [ "$#" -gt 0 ]; then
     export INTERFACE="$1"
 else
-    echo "Error: INTERFACE is not set and no argument was provided. Exiting."
+    logger -t "$SCRIPT_NAME" -p daemon.err "Error: INTERFACE is not set and no argument was provided. Exiting."
     exit 1
 fi
 
-# Check if another instance is running.
+# Define LOCKFILE and set RETRY_COUNT from last argument.
 LOCKFILE="/var/run/${SCRIPT_NAME}.${INTERFACE}.lock"
-exec 9>"$LOCKFILE" || exit 1
-lockf -s -t 0 9 || exit 0
-trap 'exec 9>&-; rm -f "$LOCKFILE"' INT TERM EXIT
+RETRY_COUNT=${2:-0}
 
 # On first execution, redirect all stdout and stderr to syslog (for devd visibility).
-RETRY_COUNT=${RETRY_COUNT:-0}
 if [ "$RETRY_COUNT" -eq 0 ]; then
+    # Check if another instance is running.
+    exec 9>"$LOCKFILE" || exit 1
+    lockf -s -t 0 9 || exit 0
+    trap 'exec 9>&-; rm -f "$LOCKFILE"' INT TERM EXIT
+
     exec 1> >(logger -t "$SCRIPT_NAME" -p daemon.notice) \
     2> >(logger -t "$SCRIPT_NAME" -p daemon.err)
 fi
@@ -68,10 +70,10 @@ fi
 handle_error() {
     echo "Error encountered at line $1 (retry $RETRY_COUNT of $MAX_RETRIES)"
     if [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; then
-        export RETRY_COUNT=$((RETRY_COUNT + 1))
+        RETRY_COUNT=$((RETRY_COUNT + 1))
         echo "Retrying in 2 seconds... (Retry $RETRY_COUNT of $MAX_RETRIES)"
         sleep 2
-        exec "$0" "$INTERFACE"
+        exec "$0" "$INTERFACE" "$RETRY_COUNT"
     else
         echo "Maximum retries reached. Exiting."
         exit 1
@@ -189,3 +191,4 @@ echo "Sending Discord notification with the following message: $DISCORD_MESSAGE"
     "$WEBHOOK_URL"
 
 echo "Notification sent successfully."
+rm -f "$LOCKFILE"
