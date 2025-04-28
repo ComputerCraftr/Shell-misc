@@ -177,14 +177,14 @@ if [ -n "$DEFAULT_GW_IPV4" ] || [ -n "$DEFAULT_GW_IPV6" ]; then
 fi
 
 # Build the external IP information string.
-EXT_IP=$("$CURL" https://ifconfig.me 2>/dev/null || true)
+EXT_IP=$("$CURL" -s --retry 5 --retry-delay 5 https://ifconfig.me || true)
 if [ -n "$EXT_IP" ]; then
     DISCORD_MESSAGE="${DISCORD_MESSAGE}\nExternal IP:\`\`\`$EXT_IP\`\`\`"
 fi
 
 # Send the Discord notification.
 echo "Sending Discord notification with the following message: $DISCORD_MESSAGE"
-"$CURL" -s -X POST -H "Content-Type: application/json" \
+"$CURL" -s --retry 5 --retry-delay 5 -X POST -H "Content-Type: application/json" \
     -d "{\"content\": \"${DISCORD_MENTION} ${DISCORD_MESSAGE}\"}" \
     "$WEBHOOK_URL"
 
