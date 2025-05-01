@@ -88,6 +88,7 @@ handle_error() {
         exec "$0" "$INTERFACE" "$RETRY_COUNT"
     else
         echo "Maximum retries reached. Exiting."
+        rm -f "$LOCKFILE"
         exit 1
     fi
 }
