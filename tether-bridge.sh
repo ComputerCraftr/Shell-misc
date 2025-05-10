@@ -54,8 +54,8 @@ if [ "$RETRY_COUNT" -eq 0 ]; then
 fi
 
 # Configuration: timeouts, intervals, and retry settings.
-IP_TIMEOUT=120     # Total seconds to wait for an IP address.
-GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
+IP_TIMEOUT=10      # Total seconds to wait for an IP address.
+GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
 MAX_RETRIES=10     # Maximum number of retries.
 

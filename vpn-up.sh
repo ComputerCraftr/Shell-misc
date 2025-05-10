@@ -60,8 +60,8 @@ OVPN_AUTH=/usr/local/etc/openvpn/.vpn-creds
 OVPN_PROXY_AUTH=/usr/local/etc/openvpn/.proxy-creds
 OVPN_PROXY_PORT=$(tail -n 1 "$OVPN_PROXY_AUTH" || echo 0)
 OVPN_INTERFACE=$(awk '/dev / {print $2; exit}' <"$OVPN_TEMPL")
-IP_TIMEOUT=120     # Total seconds to wait for an IP address.
-GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
+IP_TIMEOUT=10      # Total seconds to wait for an IP address.
+GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
 MAX_RETRIES=10     # Maximum number of retries.
 
