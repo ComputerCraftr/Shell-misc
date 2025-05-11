@@ -1,0 +1,46 @@
+FROM alpine:latest
+
+# ----- Build-time arguments -----
+ARG REPO=https://github.com/ComputerCraftr/3proxy
+ARG MAKEFILE=Makefile.Linux
+ARG TARGET_DIR=3proxy
+ARG COMPILER=clang
+ARG BINARY_OUT=bin
+
+# ----- Runtime environment -----
+ENV CC=$COMPILER \
+    MAKEFLAGS=-j$(nproc)
+
+# ----- Install toolchain and utilities -----
+RUN apk add --no-cache \
+    build-base \
+    linux-headers \
+    clang \
+    lld \
+    musl-dev \
+    git \
+    make \
+    bash \
+    findutils \
+    file \
+    binutils \
+    unixodbc-dev \
+    scanelf
+
+# ----- Set working directory -----
+WORKDIR /src
+
+# ----- Clone, build, and verify -----
+RUN git clone --depth=1 "$REPO" "$TARGET_DIR" && \
+    cd "$TARGET_DIR" && \
+    make -f "$MAKEFILE" CC="$CC" clean && \
+    make -f "$MAKEFILE" CC="$CC" && \
+    find "$BINARY_OUT" -type f -exec sh -c 'file "$1" | grep -q "ELF" && strip --strip-all "$1" || echo "Skipping non-ELF file: $1"' _ {} \; && \
+    echo "[✓] Binary types:" && \
+    find "$BINARY_OUT" -type f -exec file {} + && \
+    echo "[✓] PHDR check for all binaries:" && \
+    find "$BINARY_OUT" -type f -exec readelf -l {} + | grep PHDR || (echo "❌ Missing PHDR in at least one binary" && exit 1) && \
+    echo "[✓] INTERP check (should be empty for all):" && \
+    find "$BINARY_OUT" -type f -exec sh -c 'readelf -l "$1" | grep -q INTERP && echo "❌ $1 has dynamic linker" && exit 1 || echo "✓ $1 is static PIE"' _ {} \;
+
+CMD ["/bin/sh"]
