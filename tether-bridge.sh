@@ -168,21 +168,21 @@ if [ -z "$DEFAULT_GW_IPV4" ] && [ -z "$DEFAULT_GW_IPV6" ]; then
 fi
 
 # Build the IP information string.
-DISCORD_MESSAGE="Tethered via \`${INTERFACE}\` into \`${BRIDGE}\`, acquired IP address(es):"
+DISCORD_MESSAGE="\`$(date)\` - \`${INTERFACE}\` acquired IP address(es):"
 [ -n "$IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV4\`\`\`"
 [ -n "$IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV6\`\`\`"
 
 # Build the default gateway information string.
 if [ -n "$DEFAULT_GW_IPV4" ] || [ -n "$DEFAULT_GW_IPV6" ]; then
-    DISCORD_MESSAGE="${DISCORD_MESSAGE}\nDefault Gateway(s):"
+    DISCORD_MESSAGE="${DISCORD_MESSAGE}Default Gateway(s):"
     [ -n "$DEFAULT_GW_IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV4\`\`\`"
     [ -n "$DEFAULT_GW_IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV6\`\`\`"
 fi
 
 # Build the external IP information string.
-EXT_IP=$("$CURL" -s --retry 5 --retry-delay 5 https://ifconfig.me || true)
+EXT_IP=$("$CURL" -s --retry 5 --retry-delay 5 https://ifconfig.me)
 if [ -n "$EXT_IP" ]; then
-    DISCORD_MESSAGE="${DISCORD_MESSAGE}\nExternal IP:\`\`\`$EXT_IP\`\`\`"
+    DISCORD_MESSAGE="${DISCORD_MESSAGE}External IP:\`\`\`$EXT_IP\`\`\`"
 fi
 
 # Send the Discord notification.
