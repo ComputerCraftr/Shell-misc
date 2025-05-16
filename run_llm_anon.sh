@@ -8,24 +8,24 @@ set -eu # Exit on unset variables or errors for reliability and safety
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # === Default Configurations ===
-MODEL=""
-SESSION_NAME="llm_chat_$(date +%Y%m%d_%H%M%S)"
-SESSION_FILE=""
-CTX=0
-TOKENS=256
-THREADS=""
-TEMP=""
-TOP_P=""
-SAVE=false
-LOG=false
-LLAMA_BIN="llama-cli"
-WRAP="torsocks"
-MODE="ephemeral"
-CHAT_DIR="$HOME/.local/llm-chat"
-PROMPT_TEMPLATE="$SCRIPT_DIR/prompts/chat.txt"
-USER_NAME="anon"
-AI_NAME="assistant"
-HF_REPO=""
+MODEL=""                                       # Local model path (GGUF)
+HF_REPO=""                                     # Hugging Face repo (e.g. user/model:Q4_K_M)
+LLAMA_BIN="llama-cli"                          # Binary path (can be overridden with --bin)
+WRAP="torsocks"                                # Network wrapper (Tor by default)
+CTX=0                                          # Context size in tokens (0 = use model default)
+TOKENS=256                                     # Tokens to predict per input
+THREADS=""                                     # Number of CPU threads to use (optional)
+TEMP=""                                        # Sampling temperature
+TOP_P=""                                       # Top-p nucleus sampling
+SAVE=false                                     # Whether to save the session on exit
+LOG=false                                      # Enable logging of session
+MODE="ephemeral"                               # Chat mode (ephemeral or persistent)
+SESSION_NAME="llm_chat_$(date +%Y%m%d_%H%M%S)" # tmux session name
+SESSION_FILE=""                                # Session file path for saving/loading state
+CHAT_DIR="$HOME/.local/llm-chat"               # Persistent session storage path
+PROMPT_TEMPLATE="$SCRIPT_DIR/prompts/chat.txt" # Optional chat prompt template
+USER_NAME="anon"                               # Username label used in chat formatting
+AI_NAME="assistant"                            # Assistant label used in chat formatting
 
 # === Help Text ===
 show_help() {
@@ -132,6 +132,19 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+MODEL_ARGS=""
+[ -n "$MODEL" ] && MODEL_ARGS="--model \"$MODEL\""
+[ -n "$HF_REPO" ] && MODEL_ARGS="$MODEL_ARGS --hf-repo \"$HF_REPO\""
+
+# Token limit at which to rotate chat context (defaults to 60% of 32768 if CTX is unset)
+CTX_ROTATE_POINT=$(((CTX > 0 ? CTX : 32768) * 3 / 5))
+
+# sed pattern to strip trailing messages for context trimming
+SED_DELETE_MESSAGES="/^(${USER_NAME}:|${AI_NAME}:|\\.\\.\\.)/,\$d"
+
+# Pattern to extract session token stats from llama-cli logs
+SESSION_AND_SAMPLE_PATTERN='main: session file matches [[:digit:]]+ / [[:digit:]]+|sampling time =[[:space:]]+[[:digit:]]+\.[[:digit:]]+ ms /[[:space:]]+[[:digit:]]+'
+
 # === Validation ===
 case "$MODE" in
 ephemeral | persistent) : ;;
@@ -185,7 +198,7 @@ if [ "$MODE" = "persistent" ]; then
   fi
 
   if [ ! -e "$NEXT_PROMPT_FILE" ]; then
-    sed -r "/^($USER_NAME:|$AI_NAME:|\.\.\.)/,\$d" "$CUR_PROMPT_FILE" >"$NEXT_PROMPT_FILE"
+    sed -r "$SED_DELETE_MESSAGES" "$CUR_PROMPT_FILE" >"$NEXT_PROMPT_FILE"
     echo '...' >>"$NEXT_PROMPT_FILE"
   fi
 
@@ -195,17 +208,81 @@ if [ "$MODE" = "persistent" ]; then
       --file "$CUR_PROMPT_FILE" --prompt-cache "$PROMPT_CACHE_FILE" --n_predict 1
   fi
 
-  cp "$PROMPT_CACHE_FILE" "$CUR_PROMPT_CACHE"
-  cp "$PROMPT_CACHE_FILE" "$NEXT_PROMPT_CACHE"
+  # Only initialize CUR_PROMPT_CACHE if it does not already exist
+  if [ ! -e "$CUR_PROMPT_CACHE" ]; then
+    cp "$PROMPT_CACHE_FILE" "$CUR_PROMPT_CACHE"
+  fi
+
+  # Only initialize NEXT_PROMPT_CACHE if it does not already exist
+  if [ ! -e "$NEXT_PROMPT_CACHE" ]; then
+    cp "$PROMPT_CACHE_FILE" "$NEXT_PROMPT_CACHE"
+  fi
 
   echo '[*] Launching persistent chat with context rotation.'
-  CMD="$WRAP \"$LLAMA_BIN\" ${MODEL:+--model \"$MODEL\"} ${HF_REPO:+--hf-repo \"$HF_REPO\"} -n $TOKENS -i"
-  CMD="$CMD --prompt-cache \"$CUR_PROMPT_CACHE\" --prompt-cache-all --file \"$CUR_PROMPT_FILE\" --reverse-prompt \"$USER_NAME:\""
-  [ "$CTX" -gt 0 ] && CMD="$CMD -c $CTX"
-  [ -n "$TEMP" ] && CMD="$CMD --temp $TEMP"
-  [ -n "$TOP_P" ] && CMD="$CMD --top-p $TOP_P"
-  [ -n "$THREADS" ] && CMD="$CMD -t $THREADS"
-  eval "$CMD"
+  # --- Begin persistent chat loop ---
+  CTX=${CTX:-32768}
+  n_tokens=0
+
+  # read -e is not POSIX; use plain read (no editing support)
+  while IFS= read -r line; do # -e removed for POSIX compatibility
+    n_predict=$((CTX - n_tokens - (${#line} / 2) - 32))
+    if [ "$n_predict" -le 0 ]; then
+      wait
+      mv "$NEXT_PROMPT_FILE" "$CUR_PROMPT_FILE"
+      mv "$NEXT_PROMPT_CACHE" "$CUR_PROMPT_CACHE"
+
+      sed -r "$SED_DELETE_MESSAGES" "$CUR_PROMPT_FILE" >"$NEXT_PROMPT_FILE"
+      echo '...' >>"$NEXT_PROMPT_FILE"
+      cp "$PROMPT_CACHE_FILE" "$NEXT_PROMPT_CACHE"
+
+      n_tokens=0
+      n_predict=$((CTX / 2))
+    fi
+
+    echo " ${line}" >>"$CUR_PROMPT_FILE"
+    if [ "$n_tokens" -gt "$CTX_ROTATE_POINT" ]; then
+      echo " ${line}" >>"$NEXT_PROMPT_FILE"
+    fi
+
+    n_prompt_len_pre=$(wc -c <"$CUR_PROMPT_FILE")
+    printf '%s: ' "$AI_NAME" >>"$CUR_PROMPT_FILE"
+
+    eval "$WRAP \"$LLAMA_BIN\" $MODEL_ARGS \
+      --prompt-cache \"$CUR_PROMPT_CACHE\" \
+      --prompt-cache-all \
+      --file \"$CUR_PROMPT_FILE\" \
+      --reverse-prompt \"$USER_NAME:\" \
+      --n_predict \"$n_predict\"" |
+      dd bs=1 count=1 2>/dev/null 1>/dev/null && cat && dd bs=1 count="$n_prompt_len_pre" 2>/dev/null 1>/dev/null
+
+    # Replace [[ ... ]] with [ ... ] for test
+    if [ "$(tail -n1 "$CUR_PROMPT_FILE")" != "${USER_NAME}:" ]; then
+      printf '\n%s:' "$USER_NAME"
+      printf '\n%s:' "$USER_NAME" >>"$CUR_PROMPT_FILE"
+    fi
+
+    # Here-string <<< replaced with echo ... | pipeline
+    if ! session_and_sample_msg=$(tail -n30 "$LOG" | grep -oE "$SESSION_AND_SAMPLE_PATTERN"); then
+      echo >&2 "Couldn't get number of tokens from llama-cli output!"
+      exit 1
+    fi
+
+    n_tokens=$(
+      cut -d/ -f2 <<EOF | awk '{sum+=$1} END {print sum}'
+$session_and_sample_msg
+EOF
+    )
+
+    if [ "$n_tokens" -gt "$CTX_ROTATE_POINT" ]; then
+      tail -c+$((n_prompt_len_pre + 1)) "$CUR_PROMPT_FILE" >>"$NEXT_PROMPT_FILE"
+    fi
+
+    eval "$WRAP \"$LLAMA_BIN\" $MODEL_ARGS \
+      --prompt-cache \"$NEXT_PROMPT_CACHE\" \
+      --file \"$NEXT_PROMPT_FILE\" \
+      --n_predict 1" >>"$LOG_BG" 2>&1 &
+  done
+  # --- End persistent chat loop ---
   exit 0
 fi
 
@@ -223,7 +300,7 @@ else
   PROMPT_FILE_ARG=""
 fi
 
-LLM_CMD="$WRAP \"$LLAMA_BIN\" ${MODEL:+--model \"$MODEL\"} ${HF_REPO:+--hf-repo \"$HF_REPO\"} -i $PROMPT_FILE_ARG"
+LLM_CMD="$WRAP \"$LLAMA_BIN\" $MODEL_ARGS -i $PROMPT_FILE_ARG"
 [ "$CTX" -gt 0 ] && LLM_CMD="$LLM_CMD -c $CTX"
 [ -n "$TEMP" ] && LLM_CMD="$LLM_CMD --temp $TEMP"
 [ -n "$TOP_P" ] && LLM_CMD="$LLM_CMD --top-p $TOP_P"
@@ -232,7 +309,7 @@ LLM_CMD="$LLM_CMD -n $TOKENS"
 [ -f "$SESSION_FILE" ] && LLM_CMD="$LLM_CMD --load-session \"$SESSION_FILE\""
 [ "$SAVE" = true ] && LLM_CMD="$LLM_CMD ; $WRAP $LLAMA_BIN --model \"$MODEL\" --save-session \"$SESSION_FILE\""
 
-tmux new-session -d -s "$SESSION_NAME" "$LLM_CMD"
+tmux new-session -d -s "$SESSION_NAME" "/bin/sh -c \"$LLM_CMD\""
 
 # === Optional Logging ===
 if [ "$LOG" = true ]; then
