@@ -2,7 +2,7 @@
 # run_llm_anon.sh - Secure-by-default local LLM launcher with ephemeral/persistent modes,
 # Tor routing, context-safe defaults, and optional persistent chat history
 
-set -eu  # Exit on unset variables or errors for reliability and safety
+set -eu # Exit on unset variables or errors for reliability and safety
 
 # Base directory for resolving relative paths
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -29,7 +29,7 @@ HF_REPO=""
 
 # === Help Text ===
 show_help() {
-  cat << EOF
+  cat <<EOF
 Usage: ${0##*/} -m MODEL_PATH|--hf REPO [options]
 
 Options:
@@ -56,31 +56,89 @@ EOF
 # === Argument Parsing ===
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -m) MODEL="$2"; shift 2 ;;
-    -s) SESSION_NAME="$2"; shift 2 ;;
-    -f) SESSION_FILE="$2"; shift 2 ;;
-    -c) CTX="$2"; shift 2 ;;
-    -n) TOKENS="$2"; shift 2 ;;
-    -t) THREADS="$2"; shift 2 ;;
-    --temp) TEMP="$2"; shift 2 ;;
-    --top-p) TOP_P="$2"; shift 2 ;;
-    --save) SAVE=true; shift ;;
-    --log) LOG=true; shift ;;
-    --bin) LLAMA_BIN="$2"; shift 2 ;;
-    --hf) HF_REPO="$2"; shift 2 ;;
-    --no-tor) WRAP=""; shift ;;
-    --mode) MODE="$2"; shift 2 ;;
-    --user) USER_NAME="$2"; shift 2 ;;
-    --ai) AI_NAME="$2"; shift 2 ;;
-    -h) show_help; exit 0 ;;
-    *) echo "Unknown option: $1"; show_help; exit 1 ;;
+  -m)
+    MODEL="$2"
+    shift 2
+    ;;
+  -s)
+    SESSION_NAME="$2"
+    shift 2
+    ;;
+  -f)
+    SESSION_FILE="$2"
+    shift 2
+    ;;
+  -c)
+    CTX="$2"
+    shift 2
+    ;;
+  -n)
+    TOKENS="$2"
+    shift 2
+    ;;
+  -t)
+    THREADS="$2"
+    shift 2
+    ;;
+  --temp)
+    TEMP="$2"
+    shift 2
+    ;;
+  --top-p)
+    TOP_P="$2"
+    shift 2
+    ;;
+  --save)
+    SAVE=true
+    shift
+    ;;
+  --log)
+    LOG=true
+    shift
+    ;;
+  --bin)
+    LLAMA_BIN="$2"
+    shift 2
+    ;;
+  --hf)
+    HF_REPO="$2"
+    shift 2
+    ;;
+  --no-tor)
+    WRAP=""
+    shift
+    ;;
+  --mode)
+    MODE="$2"
+    shift 2
+    ;;
+  --user)
+    USER_NAME="$2"
+    shift 2
+    ;;
+  --ai)
+    AI_NAME="$2"
+    shift 2
+    ;;
+  -h)
+    show_help
+    exit 0
+    ;;
+  *)
+    echo "Unknown option: $1"
+    show_help
+    exit 1
+    ;;
   esac
 done
 
 # === Validation ===
 case "$MODE" in
-  ephemeral|persistent) : ;;  
-  *) echo "Invalid --mode value: $MODE"; exit 1 ;;
+ephemeral | persistent) : ;;
+*)
+  echo "Invalid --mode value: $MODE"
+  exit 1
+  ;;
 esac
 
 if [ -n "$MODEL" ]; then
@@ -116,19 +174,19 @@ if [ "$MODE" = "persistent" ]; then
   if [ -f "$PROMPT_TEMPLATE" ]; then
     if [ ! -e "$CUR_PROMPT_FILE" ]; then
       sed -e "s/\[\[USER_NAME\]\]/$USER_NAME/g" \
-          -e "s/\[\[AI_NAME\]\]/$AI_NAME/g" \
-          -e "s/\[\[DATE_TIME\]\]/$DATE_TIME/g" \
-          -e "s/\[\[DATE_YEAR\]\]/$DATE_YEAR/g" \
-          "$PROMPT_TEMPLATE" > "$CUR_PROMPT_FILE"
+        -e "s/\[\[AI_NAME\]\]/$AI_NAME/g" \
+        -e "s/\[\[DATE_TIME\]\]/$DATE_TIME/g" \
+        -e "s/\[\[DATE_YEAR\]\]/$DATE_YEAR/g" \
+        "$PROMPT_TEMPLATE" >"$CUR_PROMPT_FILE"
     fi
   else
     echo "[*] Warning: Prompt template not found. Starting with empty prompt."
-    : > "$CUR_PROMPT_FILE"
+    : >"$CUR_PROMPT_FILE"
   fi
 
   if [ ! -e "$NEXT_PROMPT_FILE" ]; then
-    sed -r "/^($USER_NAME:|$AI_NAME:|\.\.\.)/,\$d" "$CUR_PROMPT_FILE" > "$NEXT_PROMPT_FILE"
-    echo '...' >> "$NEXT_PROMPT_FILE"
+    sed -r "/^($USER_NAME:|$AI_NAME:|\.\.\.)/,\$d" "$CUR_PROMPT_FILE" >"$NEXT_PROMPT_FILE"
+    echo '...' >>"$NEXT_PROMPT_FILE"
   fi
 
   if [ ! -e "$PROMPT_CACHE_FILE" ]; then
@@ -152,8 +210,20 @@ if [ "$MODE" = "persistent" ]; then
 fi
 
 # === Ephemeral Mode via tmux ===
-[ -z "$SESSION_FILE" ] && SESSION_FILE="${SESSION_NAME}.session"
-LLM_CMD="$WRAP \"$LLAMA_BIN\" ${MODEL:+--model \"$MODEL\"} ${HF_REPO:+--hf-repo \"$HF_REPO\"} -i"
+if [ -f "$PROMPT_TEMPLATE" ]; then
+  CUR_PROMPT_FILE=$(mktemp /tmp/llm_prompt.XXXXXX)
+  sed -e "s/\[\[USER_NAME\]\]/$USER_NAME/g" \
+    -e "s/\[\[AI_NAME\]\]/$AI_NAME/g" \
+    -e "s/\[\[DATE_TIME\]\]/$(date +%H:%M)/g" \
+    -e "s/\[\[DATE_YEAR\]\]/$(date +%Y)/g" \
+    "$PROMPT_TEMPLATE" >"$CUR_PROMPT_FILE"
+  trap 'rm -f "$CUR_PROMPT_FILE"' EXIT
+  PROMPT_FILE_ARG="--file \"$CUR_PROMPT_FILE\""
+else
+  PROMPT_FILE_ARG=""
+fi
+
+LLM_CMD="$WRAP \"$LLAMA_BIN\" ${MODEL:+--model \"$MODEL\"} ${HF_REPO:+--hf-repo \"$HF_REPO\"} -i $PROMPT_FILE_ARG"
 [ "$CTX" -gt 0 ] && LLM_CMD="$LLM_CMD -c $CTX"
 [ -n "$TEMP" ] && LLM_CMD="$LLM_CMD --temp $TEMP"
 [ -n "$TOP_P" ] && LLM_CMD="$LLM_CMD --top-p $TOP_P"
@@ -176,4 +246,3 @@ fi
 echo "Started $MODE llama.cpp chat in tmux session: $SESSION_NAME"
 echo "Attach with: tmux attach-session -t $SESSION_NAME"
 exit 0
-
