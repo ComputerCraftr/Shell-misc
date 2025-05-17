@@ -4,8 +4,17 @@
 
 set -eu # Exit on unset variables or errors for reliability and safety
 
-# Base directory for resolving relative paths
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DATE_TIME=$(date +%H:%M) # Current time used in prompts
+DATE_YEAR=$(date +%Y)    # Current year used in prompts
+
+# === Shared fallback prompt used if PROMPT_TEMPLATE is missing ===
+FALLBACK_PROMPT="You are a helpful assistant.
+
+$USER_NAME: What time is it?
+
+$AI_NAME: It is $DATE_TIME on $DATE_YEAR.
+
+$USER_NAME:"
 
 # === Default Configurations ===
 MODEL=""                                       # Local model path (GGUF)
@@ -13,17 +22,14 @@ HF_REPO=""                                     # Hugging Face repo (e.g. user/mo
 LLAMA_BIN="llama-cli"                          # Binary path (can be overridden with --bin)
 WRAP="torsocks"                                # Network wrapper (Tor by default)
 CTX=0                                          # Context size in tokens (0 = use model default)
-TOKENS=256                                     # Tokens to predict per input
 THREADS=""                                     # Number of CPU threads to use (optional)
 TEMP=""                                        # Sampling temperature
 TOP_P=""                                       # Top-p nucleus sampling
-SAVE=false                                     # Whether to save the session on exit
 LOG=false                                      # Enable logging of session
 MODE="ephemeral"                               # Chat mode (ephemeral or persistent)
 SESSION_NAME="llm_chat_$(date +%Y%m%d_%H%M%S)" # tmux session name
-SESSION_FILE=""                                # Session file path for saving/loading state
 CHAT_DIR="$HOME/.local/llm-chat"               # Persistent session storage path
-PROMPT_TEMPLATE="$SCRIPT_DIR/prompts/chat.txt" # Optional chat prompt template
+PROMPT_TEMPLATE="$CHAT_DIR/prompts/chat.txt"   # Optional chat prompt template
 USER_NAME="anon"                               # Username label used in chat formatting
 AI_NAME="assistant"                            # Assistant label used in chat formatting
 
@@ -35,13 +41,10 @@ Usage: ${0##*/} -m MODEL_PATH|--hf REPO [options]
 Options:
   -m MODEL_PATH     Path to GGUF model (required unless --hf is used)
   -s SESSION_NAME   tmux session name (default: auto-generated)
-  -f SESSION_FILE   Session file for saving/loading (optional)
   -c CONTEXT_SIZE   Context tokens (0 = use model default)
-  -n TOKENS         Tokens to predict (default: 256)
   -t THREADS        Number of CPU threads to use (optional)
   --temp VALUE      Sampling temperature (optional)
   --top-p VALUE     Nucleus sampling probability (optional)
-  --save            Save session on exit (creates session_name.session)
   --log             Log output to ~/llm_logs/session_name_timestamp.log
   --bin PATH        Path to llama-cli or main binary (default: llama-cli from pkg)
   --hf REPO[:QUANT] Hugging Face repo for remote model download
@@ -64,16 +67,8 @@ while [ "$#" -gt 0 ]; do
     SESSION_NAME="$2"
     shift 2
     ;;
-  -f)
-    SESSION_FILE="$2"
-    shift 2
-    ;;
   -c)
     CTX="$2"
-    shift 2
-    ;;
-  -n)
-    TOKENS="$2"
     shift 2
     ;;
   -t)
@@ -87,10 +82,6 @@ while [ "$#" -gt 0 ]; do
   --top-p)
     TOP_P="$2"
     shift 2
-    ;;
-  --save)
-    SAVE=true
-    shift
     ;;
   --log)
     LOG=true
@@ -136,6 +127,15 @@ MODEL_ARGS=""
 [ -n "$MODEL" ] && MODEL_ARGS="--model \"$MODEL\""
 [ -n "$HF_REPO" ] && MODEL_ARGS="$MODEL_ARGS --hf-repo \"$HF_REPO\""
 
+# Optional NUMA optimization
+if [ -z "${NUMA_OPT+x}" ]; then
+  if sysctl -n vm.ndomains 2>/dev/null | grep -qE '^[2-9][0-9]*$'; then
+    NUMA_OPT="--numa distribute" # Enable if multiple NUMA nodes exist
+  else
+    NUMA_OPT=""
+  fi
+fi
+
 # Token limit at which to rotate chat context (defaults to 60% of 32768 if CTX is unset)
 CTX_ROTATE_POINT=$(((CTX > 0 ? CTX : 32768) * 3 / 5))
 
@@ -174,9 +174,9 @@ fi
 
 # === Persistent Chat Mode ===
 if [ "$MODE" = "persistent" ]; then
-  DATE_TIME=$(date +%H:%M)
-  DATE_YEAR=$(date +%Y)
   mkdir -p "$CHAT_DIR"
+  LOG_CHAT="$CHAT_DIR/main.log"  # Main interactive log
+  LOG_BG="$CHAT_DIR/main-bg.log" # Background prompt cache log
   PROMPT_CACHE_FILE="$CHAT_DIR/prompt-cache.bin"
   CUR_PROMPT_FILE="$CHAT_DIR/current-prompt.txt"
   CUR_PROMPT_CACHE="$CHAT_DIR/current-cache.bin"
@@ -193,8 +193,8 @@ if [ "$MODE" = "persistent" ]; then
         "$PROMPT_TEMPLATE" >"$CUR_PROMPT_FILE"
     fi
   else
-    echo "[*] Warning: Prompt template not found. Starting with empty prompt."
-    : >"$CUR_PROMPT_FILE"
+    echo "[*] Warning: Prompt template not found. Using simple default system prompt."
+    echo "$FALLBACK_PROMPT" >"$CUR_PROMPT_FILE"
   fi
 
   if [ ! -e "$NEXT_PROMPT_FILE" ]; then
@@ -205,7 +205,7 @@ if [ "$MODE" = "persistent" ]; then
   if [ ! -e "$PROMPT_CACHE_FILE" ]; then
     echo '[*] Building prompt cache...'
     $WRAP "$LLAMA_BIN" ${HF_REPO:+--hf-repo "$HF_REPO"} --batch_size 64 -c "$CTX" \
-      --file "$CUR_PROMPT_FILE" --prompt-cache "$PROMPT_CACHE_FILE" --n_predict 1
+      --file "$CUR_PROMPT_FILE" --prompt-cache "$PROMPT_CACHE_FILE" --n-predict 1
   fi
 
   # Only initialize CUR_PROMPT_CACHE if it does not already exist
@@ -252,7 +252,7 @@ if [ "$MODE" = "persistent" ]; then
       --prompt-cache-all \
       --file \"$CUR_PROMPT_FILE\" \
       --reverse-prompt \"$USER_NAME:\" \
-      --n_predict \"$n_predict\"" |
+      --n-predict \"$n_predict\" $NUMA_OPT" |
       dd bs=1 count=1 2>/dev/null 1>/dev/null && cat && dd bs=1 count="$n_prompt_len_pre" 2>/dev/null 1>/dev/null
 
     # Replace [[ ... ]] with [ ... ] for test
@@ -262,7 +262,7 @@ if [ "$MODE" = "persistent" ]; then
     fi
 
     # Here-string <<< replaced with echo ... | pipeline
-    if ! session_and_sample_msg=$(tail -n30 "$LOG" | grep -oE "$SESSION_AND_SAMPLE_PATTERN"); then
+    if ! session_and_sample_msg=$(tail -n30 "$LOG_CHAT" | grep -oE "$SESSION_AND_SAMPLE_PATTERN"); then
       echo >&2 "Couldn't get number of tokens from llama-cli output!"
       exit 1
     fi
@@ -280,34 +280,40 @@ EOF
     eval "$WRAP \"$LLAMA_BIN\" $MODEL_ARGS \
       --prompt-cache \"$NEXT_PROMPT_CACHE\" \
       --file \"$NEXT_PROMPT_FILE\" \
-      --n_predict 1" >>"$LOG_BG" 2>&1 &
+      --n-predict 1 $NUMA_OPT" >>"$LOG_BG" 2>&1 &
   done
   # --- End persistent chat loop ---
   exit 0
 fi
 
 # === Ephemeral Mode via tmux ===
+CUR_PROMPT_FILE=$(mktemp /tmp/llm_prompt.XXXXXX)
 if [ -f "$PROMPT_TEMPLATE" ]; then
-  CUR_PROMPT_FILE=$(mktemp /tmp/llm_prompt.XXXXXX)
   sed -e "s/\[\[USER_NAME\]\]/$USER_NAME/g" \
     -e "s/\[\[AI_NAME\]\]/$AI_NAME/g" \
-    -e "s/\[\[DATE_TIME\]\]/$(date +%H:%M)/g" \
-    -e "s/\[\[DATE_YEAR\]\]/$(date +%Y)/g" \
+    -e "s/\[\[DATE_TIME\]\]/$DATE_TIME/g" \
+    -e "s/\[\[DATE_YEAR\]\]/$DATE_YEAR/g" \
     "$PROMPT_TEMPLATE" >"$CUR_PROMPT_FILE"
-  trap 'rm -f "$CUR_PROMPT_FILE"' EXIT
-  PROMPT_FILE_ARG="--file \"$CUR_PROMPT_FILE\""
 else
-  PROMPT_FILE_ARG=""
+  echo "$FALLBACK_PROMPT" >"$CUR_PROMPT_FILE"
 fi
+trap 'rm -f "$CUR_PROMPT_FILE"' EXIT
+PROMPT_FILE_ARG="--file \"$CUR_PROMPT_FILE\""
 
-LLM_CMD="$WRAP \"$LLAMA_BIN\" $MODEL_ARGS -i $PROMPT_FILE_ARG"
-[ "$CTX" -gt 0 ] && LLM_CMD="$LLM_CMD -c $CTX"
-[ -n "$TEMP" ] && LLM_CMD="$LLM_CMD --temp $TEMP"
-[ -n "$TOP_P" ] && LLM_CMD="$LLM_CMD --top-p $TOP_P"
-[ -n "$THREADS" ] && LLM_CMD="$LLM_CMD -t $THREADS"
-LLM_CMD="$LLM_CMD -n $TOKENS"
-[ -f "$SESSION_FILE" ] && LLM_CMD="$LLM_CMD --load-session \"$SESSION_FILE\""
-[ "$SAVE" = true ] && LLM_CMD="$LLM_CMD ; $WRAP $LLAMA_BIN --model \"$MODEL\" --save-session \"$SESSION_FILE\""
+# Construct argument string for ephemeral mode
+ARGS=""
+ARGS="$ARGS $MODEL_ARGS"
+ARGS="$ARGS -i"
+ARGS="$ARGS $PROMPT_FILE_ARG"
+[ -n "$USER_NAME" ] && ARGS="$ARGS --reverse-prompt \"$USER_NAME:\""
+[ "$CTX" -gt 0 ] && ARGS="$ARGS -c $CTX"
+[ -n "$TEMP" ] && ARGS="$ARGS --temp $TEMP"
+[ -n "$TOP_P" ] && ARGS="$ARGS --top-p $TOP_P"
+[ -n "$THREADS" ] && ARGS="$ARGS -t $THREADS"
+ARGS="$ARGS $NUMA_OPT"
+ARGS="$ARGS && echo \"Press enter to clear the session.\" && read -r _dummy_variable"
+
+LLM_CMD="$WRAP \"$LLAMA_BIN\" $ARGS"
 
 tmux new-session -d -s "$SESSION_NAME" "/bin/sh -c \"$LLM_CMD\""
 
