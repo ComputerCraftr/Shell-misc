@@ -7,15 +7,6 @@ set -eu # Exit on unset variables or errors for reliability and safety
 DATE_TIME=$(date +%H:%M) # Current time used in prompts
 DATE_YEAR=$(date +%Y)    # Current year used in prompts
 
-# === Shared fallback prompt used if PROMPT_TEMPLATE is missing ===
-FALLBACK_PROMPT="You are a helpful assistant.
-
-$USER_NAME: What time is it?
-
-$AI_NAME: It is $DATE_TIME on $DATE_YEAR.
-
-$USER_NAME:"
-
 # === Default Configurations ===
 MODEL=""                                       # Local model path (GGUF)
 HF_REPO=""                                     # Hugging Face repo (e.g. user/model:Q4_K_M)
@@ -135,6 +126,15 @@ if [ -z "${NUMA_OPT+x}" ]; then
     NUMA_OPT=""
   fi
 fi
+
+# === Shared fallback prompt used if PROMPT_TEMPLATE is missing ===
+FALLBACK_PROMPT="You are a helpful assistant.
+
+$USER_NAME: What time is it?
+
+$AI_NAME: It is $DATE_TIME on $DATE_YEAR.
+
+$USER_NAME:"
 
 # Token limit at which to rotate chat context (defaults to 60% of 32768 if CTX is unset)
 CTX_ROTATE_POINT=$(((CTX > 0 ? CTX : 32768) * 3 / 5))
