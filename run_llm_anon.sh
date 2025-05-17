@@ -311,7 +311,7 @@ ARGS="$ARGS $PROMPT_FILE_ARG"
 [ -n "$TOP_P" ] && ARGS="$ARGS --top-p $TOP_P"
 [ -n "$THREADS" ] && ARGS="$ARGS -t $THREADS"
 ARGS="$ARGS $NUMA_OPT"
-ARGS="$ARGS && echo \"Press enter to clear the session.\" && read -r _dummy_variable"
+ARGS="$ARGS || echo \"Press enter to clear the session.\" && read -r _dummy_variable && rm -f \"$CUR_PROMPT_FILE\""
 
 LLM_CMD="$WRAP \"$LLAMA_BIN\" $ARGS"
 
