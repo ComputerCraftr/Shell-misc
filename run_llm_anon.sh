@@ -4,9 +4,9 @@
 
 set -eu # Exit on unset variables or errors for reliability and safety
 
-DATE_TIME=$(date +%H:%M) # Current time used in prompts
-DATE_YEAR=$(date +%m-%Y) # Current month and year used in prompts
-DATE_FULL=$(date)        # Current date and time used in prompts
+DATE_TIME=$(date +"%H:%M:%S %Z")                  # Current time with seconds and timezone
+DATE_YEAR=$(date +%B\ %Y)                         # Current month and year used in prompts
+DATE_FULL=$(date +"%A, %B %d, %Y at %H:%M:%S %Z") # Full formatted date and time
 
 # === Default Configurations ===
 MODEL=""                                       # Local model path (GGUF)
