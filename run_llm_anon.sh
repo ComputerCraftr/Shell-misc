@@ -135,7 +135,7 @@ fi
 
 # === Shared system prompt used if SYSTEM_TEMPLATE is missing ===
 SYSTEM_PROMPT="It is $DATE_FULL and you are a helpful assistant answering with \"$AI_NAME:\" and \
-using colors and formatting compatible with a text terminal."
+using emojis and formatting compatible with a unicode text terminal."
 
 # === Shared fallback prompt used if PROMPT_TEMPLATE is missing ===
 FALLBACK_PROMPT="$USER_NAME: Can you help answer some questions quickly? /nothink"
