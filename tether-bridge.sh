@@ -89,7 +89,8 @@ if [ -f /usr/local/etc/.gateway-env.conf ]; then
     # Using "source ... || false" to ensure a failure can be caught for retries.
     source /usr/local/etc/.gateway-env.conf || false
 else
-    echo "Warning: /usr/local/etc/.gateway-env.conf not found, proceeding with default values."
+    echo "Error: /usr/local/etc/.gateway-env.conf not found."
+    exit 1
 fi
 
 # Set defaults for the bridge and Discord notification if not defined.
