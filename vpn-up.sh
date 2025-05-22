@@ -101,7 +101,8 @@ if [ -f /usr/local/etc/.gateway-env.conf ]; then
     # Using "source ... || false" to ensure a failure can be caught for retries.
     source /usr/local/etc/.gateway-env.conf || false
 else
-    echo "Warning: /usr/local/etc/.gateway-env.conf not found, proceeding with default values."
+    echo "Error: /usr/local/etc/.gateway-env.conf not found."
+    exit 1
 fi
 
 # Set defaults for the Discord notification if not defined.
@@ -195,13 +196,22 @@ if [ -n "$DEFAULT_GW_IPV4" ] || [ -n "$DEFAULT_GW_IPV6" ]; then
 fi
 
 # Poll for an IPv4 address on the tunnel interface.
+SECONDS_WAITED=0
+OVPN_IPV4=""
+
 while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
-    if ifconfig "$OVPN_INTERFACE" | grep -qwF 'inet'; then
+    OVPN_IPV4=$(ifconfig "$OVPN_INTERFACE" | awk '/inet / {print $2; exit}')
+    if [ -n "$OVPN_IPV4" ]; then
         break
     fi
     sleep "$INTERVAL"
     SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
 done
+
+if [ -z "$OVPN_IPV4" ]; then
+    echo "Error: Failed to acquire an IP address on tunnel interface $OVPN_INTERFACE after $IP_TIMEOUT seconds."
+    false
+fi
 
 # Build the external IP information string.
 EXT_IP=$("$CURL" -s --retry 5 --retry-delay 5 https://ifconfig.me)
