@@ -25,21 +25,21 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# Handle interface from either $INTERFACE (retry) or $1 (first run).
-if [ -n "${INTERFACE:-}" ]; then
+# Handle interface from either $SCRIPT_INTERFACE (retry) or $1 (first run).
+if [ -n "${SCRIPT_INTERFACE:-}" ]; then
     # Already exported by a retry
-    if [ "$#" -gt 0 ] && [ "$1" != "$INTERFACE" ]; then
-        logger -t "$SCRIPT_NAME" -p daemon.notice "Warning: INTERFACE is already set to '$INTERFACE'; ignoring argument '$1'."
+    if [ "$#" -gt 0 ] && [ "$1" != "$SCRIPT_INTERFACE" ]; then
+        logger -t "$SCRIPT_NAME" -p daemon.notice "Warning: SCRIPT_INTERFACE is already set to '$SCRIPT_INTERFACE'; ignoring argument '$1'."
     fi
 elif [ "$#" -gt 0 ]; then
-    export INTERFACE="$1"
+    export SCRIPT_INTERFACE="$1"
 else
-    logger -t "$SCRIPT_NAME" -p daemon.err "Error: INTERFACE is not set and no argument was provided. Exiting."
+    logger -t "$SCRIPT_NAME" -p daemon.err "Error: SCRIPT_INTERFACE is not set and no argument was provided. Exiting."
     exit 1
 fi
 
 # Define LOCKFILE and set RETRY_COUNT from last argument.
-LOCKFILE="/var/run/${SCRIPT_NAME}.${INTERFACE}.lock"
+LOCKFILE="/var/run/${SCRIPT_NAME}.${SCRIPT_INTERFACE}.lock"
 RETRY_COUNT=${2:-0}
 
 # On first execution, redirect all stdout and stderr to syslog (for devd visibility).
@@ -73,7 +73,7 @@ handle_error() {
         RETRY_COUNT=$((RETRY_COUNT + 1))
         echo "Retrying in 2 seconds... (Retry $RETRY_COUNT of $MAX_RETRIES)"
         sleep 2
-        exec "$0" "$INTERFACE" "$RETRY_COUNT"
+        exec "$0" "$SCRIPT_INTERFACE" "$RETRY_COUNT"
     else
         echo "Maximum retries reached. Exiting."
         rm -f "$LOCKFILE"
@@ -94,7 +94,7 @@ else
 fi
 
 # Set defaults for the bridge and Discord notification if not defined.
-: "${BRIDGE:=bridge0}"
+: "${BRIDGE_INTERFACE:=bridge0}"
 : "${DISCORD_MENTION:=@everyone}"
 
 # Ensure the webhook URL is defined.
@@ -103,28 +103,28 @@ if [ -z "${WEBHOOK_URL:-}" ]; then
     exit 1
 fi
 
-echo "Starting tether bridge setup for interface: $INTERFACE into bridge: $BRIDGE"
+echo "Starting tether bridge setup for interface: $SCRIPT_INTERFACE into bridge: $BRIDGE_INTERFACE"
 
 # Verify the specified interface exists. Sometimes it isn't available immediately.
-if ! ifconfig "$INTERFACE" >/dev/null 2>&1; then
-    echo "Error: Interface $INTERFACE does not exist."
+if ! ifconfig "$SCRIPT_INTERFACE" >/dev/null 2>&1; then
+    echo "Error: Interface $SCRIPT_INTERFACE does not exist."
     false
 fi
 
 # Add the interface to the bridge if it's not already a member.
-if ! ifconfig "$BRIDGE" | grep -qw "$INTERFACE"; then
-    ifconfig "$BRIDGE" addm "$INTERFACE"
-    echo "Added interface $INTERFACE to bridge $BRIDGE"
+if ! ifconfig "$BRIDGE_INTERFACE" | grep -qw "$SCRIPT_INTERFACE"; then
+    ifconfig "$BRIDGE_INTERFACE" addm "$SCRIPT_INTERFACE"
+    echo "Added interface $SCRIPT_INTERFACE to bridge $BRIDGE_INTERFACE"
 else
-    echo "Interface $INTERFACE is already a member of bridge $BRIDGE"
+    echo "Interface $SCRIPT_INTERFACE is already a member of bridge $BRIDGE_INTERFACE"
 fi
 
 # Bring the interface up.
-ifconfig "$INTERFACE" up
+ifconfig "$SCRIPT_INTERFACE" up
 
 # Restart the DHCP client service on the bridge.
-echo "Restarting DHCP client on bridge $BRIDGE..."
-service dhclient restart "$BRIDGE"
+echo "Restarting DHCP client on bridge $BRIDGE_INTERFACE..."
+service dhclient restart "$BRIDGE_INTERFACE"
 
 # Poll for an IPv4 or non-link-local IPv6 address on the bridge.
 SECONDS_WAITED=0
@@ -132,8 +132,8 @@ IPV4=""
 IPV6=""
 
 while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
-    IPV4=$(ifconfig "$BRIDGE" | awk '/inet / {print $2; exit}')
-    IPV6=$(ifconfig "$BRIDGE" | awk '/inet6 / && $2 !~ /^fe80/ {print $2; exit}')
+    IPV4=$(ifconfig "$BRIDGE_INTERFACE" | awk '/inet / {print $2; exit}')
+    IPV6=$(ifconfig "$BRIDGE_INTERFACE" | awk '/inet6 / && $2 !~ /^fe80/ {print $2; exit}')
     if [ -n "$IPV4" ] || [ -n "$IPV6" ]; then
         break
     fi
@@ -142,7 +142,7 @@ while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
 done
 
 if [ -z "$IPV4" ] && [ -z "$IPV6" ]; then
-    echo "Error: Failed to acquire an IP address on bridge $BRIDGE after $IP_TIMEOUT seconds."
+    echo "Error: Failed to acquire an IP address on bridge $BRIDGE_INTERFACE after $IP_TIMEOUT seconds."
     false
 fi
 
@@ -164,12 +164,12 @@ while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
 done
 
 if [ -z "$DEFAULT_GW_IPV4" ] && [ -z "$DEFAULT_GW_IPV6" ]; then
-    echo "Error: Failed to acquire a default gateway on interface $INTERFACE after $GATEWAY_TIMEOUT seconds."
+    echo "Error: Failed to acquire a default gateway on interface $SCRIPT_INTERFACE after $GATEWAY_TIMEOUT seconds."
     false
 fi
 
 # Build the IP information string.
-DISCORD_MESSAGE="\`$(date)\` - \`${INTERFACE}\` acquired IP address(es):"
+DISCORD_MESSAGE="\`$(date)\` - \`${SCRIPT_INTERFACE}\` acquired IP address(es):"
 [ -n "$IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV4\`\`\`"
 [ -n "$IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV6\`\`\`"
 

@@ -25,21 +25,21 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# Handle interface from either $INTERFACE (retry) or $1 (first run).
-if [ -n "${INTERFACE:-}" ]; then
+# Handle interface from either $SCRIPT_INTERFACE (retry) or $1 (first run).
+if [ -n "${SCRIPT_INTERFACE:-}" ]; then
     # Already exported by a retry
-    if [ "$#" -gt 0 ] && [ "$1" != "$INTERFACE" ]; then
-        logger -t "$SCRIPT_NAME" -p daemon.notice "Warning: INTERFACE is already set to '$INTERFACE'; ignoring argument '$1'."
+    if [ "$#" -gt 0 ] && [ "$1" != "$SCRIPT_INTERFACE" ]; then
+        logger -t "$SCRIPT_NAME" -p daemon.notice "Warning: SCRIPT_INTERFACE is already set to '$SCRIPT_INTERFACE'; ignoring argument '$1'."
     fi
 elif [ "$#" -gt 0 ]; then
-    export INTERFACE="$1"
+    export SCRIPT_INTERFACE="$1"
 else
-    logger -t "$SCRIPT_NAME" -p daemon.err "Error: INTERFACE is not set and no argument was provided. Exiting."
+    logger -t "$SCRIPT_NAME" -p daemon.err "Error: SCRIPT_INTERFACE is not set and no argument was provided. Exiting."
     exit 1
 fi
 
 # Define LOCKFILE and set RETRY_COUNT from last argument.
-LOCKFILE="/var/run/${SCRIPT_NAME}.${INTERFACE}.lock"
+LOCKFILE="/var/run/${SCRIPT_NAME}.${SCRIPT_INTERFACE}.lock"
 RETRY_COUNT=${2:-0}
 
 # On first execution, redirect all stdout and stderr to syslog (for devd visibility).
@@ -85,7 +85,7 @@ handle_error() {
         RETRY_COUNT=$((RETRY_COUNT + 1))
         echo "Retrying in 2 seconds... (Retry $RETRY_COUNT of $MAX_RETRIES)"
         sleep 2
-        exec "$0" "$INTERFACE" "$RETRY_COUNT"
+        exec "$0" "$SCRIPT_INTERFACE" "$RETRY_COUNT"
     else
         echo "Maximum retries reached. Exiting."
         rm -f "$LOCKFILE"
@@ -114,20 +114,20 @@ if [ -z "${WEBHOOK_URL:-}" ]; then
     exit 1
 fi
 
-echo "Starting VPN setup for interface: $INTERFACE"
+echo "Starting VPN setup for interface: $SCRIPT_INTERFACE"
 
 # Verify the specified interface exists. Sometimes it isn't available immediately.
-if ! ifconfig "$INTERFACE" >/dev/null 2>&1; then
-    echo "Error: Interface $INTERFACE does not exist."
+if ! ifconfig "$SCRIPT_INTERFACE" >/dev/null 2>&1; then
+    echo "Error: Interface $SCRIPT_INTERFACE does not exist."
     false
 fi
 
 # Bring the interface up.
-ifconfig "$INTERFACE" up
+ifconfig "$SCRIPT_INTERFACE" up
 
 # Restart the DHCP client service on the interface.
-echo "Restarting DHCP client on interface $INTERFACE..."
-service dhclient restart "$INTERFACE"
+echo "Restarting DHCP client on interface $SCRIPT_INTERFACE..."
+service dhclient restart "$SCRIPT_INTERFACE"
 
 # Poll for an IPv4 or non-link-local IPv6 address on the interface.
 SECONDS_WAITED=0
@@ -135,8 +135,8 @@ IPV4=""
 IPV6=""
 
 while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
-    IPV4=$(ifconfig "$INTERFACE" | awk '/inet / {print $2; exit}')
-    IPV6=$(ifconfig "$INTERFACE" | awk '/inet6 / && $2 !~ /^fe80/ {print $2; exit}')
+    IPV4=$(ifconfig "$SCRIPT_INTERFACE" | awk '/inet / {print $2; exit}')
+    IPV6=$(ifconfig "$SCRIPT_INTERFACE" | awk '/inet6 / && $2 !~ /^fe80/ {print $2; exit}')
     if [ -n "$IPV4" ] || [ -n "$IPV6" ]; then
         break
     fi
@@ -145,7 +145,7 @@ while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
 done
 
 if [ -z "$IPV4" ] && [ -z "$IPV6" ]; then
-    echo "Error: Failed to acquire an IP address on interface $INTERFACE after $IP_TIMEOUT seconds."
+    echo "Error: Failed to acquire an IP address on interface $SCRIPT_INTERFACE after $IP_TIMEOUT seconds."
     false
 fi
 
@@ -167,7 +167,7 @@ while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
 done
 
 if [ -z "$DEFAULT_GW_IPV4" ]; then
-    echo "Error: Failed to acquire a default gateway on interface $INTERFACE after $GATEWAY_TIMEOUT seconds."
+    echo "Error: Failed to acquire a default gateway on interface $SCRIPT_INTERFACE after $GATEWAY_TIMEOUT seconds."
     false
 fi
 
@@ -184,7 +184,7 @@ service openvpn restart
 service kea restart
 
 # Build the IP information string.
-DISCORD_MESSAGE="\`$(date)\` - \`${INTERFACE}\` acquired IP address(es):"
+DISCORD_MESSAGE="\`$(date)\` - \`${SCRIPT_INTERFACE}\` acquired IP address(es):"
 [ -n "$IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV4\`\`\`"
 [ -n "$IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV6\`\`\`"
 
