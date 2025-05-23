@@ -221,11 +221,6 @@ fi
 
 # Bring up IPv6 gateway tunnel if available.
 if [ -n "$GIF_INTERFACE" ] && [ -n "$BRIDGE_INTERFACE" ] && [ -n "$GIF_UPDATE_URL" ]; then
-    # Update the external IP.
-    "$CURL" -s --retry 5 --retry-delay 5 -X GET \
-        -H "Cache-Control: no-cache, no-store, must-revalidate" \
-        "$GIF_UPDATE_URL&myip=$EXT_IP"
-
     # Calculate MTU - 20 bytes for 6in4 overhead.
     GIF_MTU=$(($(ifconfig "$OVPN_INTERFACE" | awk '/mtu/ {print $NF; exit}') - 20))
 
@@ -233,6 +228,11 @@ if [ -n "$GIF_INTERFACE" ] && [ -n "$BRIDGE_INTERFACE" ] && [ -n "$GIF_UPDATE_UR
     ifconfig "$GIF_INTERFACE" tunnel "$OVPN_IPV4" "$GIF_IPV4_SERVER" mtu "$GIF_MTU"
     ifconfig "$GIF_INTERFACE" inet6 "$GIF_IPV6_CLIENT" "$GIF_IPV6_SERVER" prefixlen 128 up
     ifconfig "$BRIDGE_INTERFACE" inet6 "$GIF_IPV6_LOCAL" prefixlen 64 up
+
+    # Update the external IP.
+    "$CURL" -s --retry 5 --retry-delay 5 -X GET \
+        -H "Cache-Control: no-cache, no-store, must-revalidate" \
+        "$GIF_UPDATE_URL&myip=$EXT_IP"
 
     # Set the default IPv6 route.
     route -n delete -inet6 default || true
