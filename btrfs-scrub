@@ -1,0 +1,3 @@
+#!/bin/sh
+# Foreground btrfs root scrub
+btrfs scrub start -Bd /
