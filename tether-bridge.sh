@@ -2,13 +2,17 @@
 # /usr/local/bin/tether-bridge.sh
 SCRIPT_NAME=tether-bridge
 
+# Define logging wrapper functions.
+log() { logger -t "$SCRIPT_NAME" -p daemon.notice "$*"; }
+log_err() { logger -t "$SCRIPT_NAME" -p daemon.err "$*"; }
+
 # If not running under full Bash mode (or if in POSIX compatibility mode), re-execute using full Bash.
 if [ -z "${BASH_VERSION:-}" ]; then
     # Ensure a good PATH so that bash and related tools are found.
     export PATH="/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin:/usr/local/sbin"
     BASH_PATH=$(command -v bash)
     if [ -z "$BASH_PATH" ]; then
-        logger -t "$SCRIPT_NAME" -p daemon.err "bash not found in PATH, cannot run script."
+        log_err "bash not found in PATH, cannot run script."
         exit 1
     fi
     exec "$BASH_PATH" "$0" "$@"
@@ -21,7 +25,7 @@ IFS=$'\n\t'
 
 # Ensure the script is run as root.
 if [ "$(id -u)" -ne 0 ]; then
-    logger -t "$SCRIPT_NAME" -p daemon.err "Error: This script must be run as root. Exiting."
+    log_err "Error: This script must be run as root. Exiting."
     exit 1
 fi
 
@@ -29,12 +33,12 @@ fi
 if [ -n "${SCRIPT_INTERFACE:-}" ]; then
     # Already exported by a retry
     if [ "$#" -gt 0 ] && [ "$1" != "$SCRIPT_INTERFACE" ]; then
-        logger -t "$SCRIPT_NAME" -p daemon.notice "Warning: SCRIPT_INTERFACE is already set to '$SCRIPT_INTERFACE'; ignoring argument '$1'."
+        log "Warning: SCRIPT_INTERFACE is already set to '$SCRIPT_INTERFACE'; ignoring argument '$1'."
     fi
 elif [ "$#" -gt 0 ]; then
     export SCRIPT_INTERFACE="$1"
 else
-    logger -t "$SCRIPT_NAME" -p daemon.err "Error: SCRIPT_INTERFACE is not set and no argument was provided. Exiting."
+    log_err "Error: SCRIPT_INTERFACE is not set and no argument was provided. Exiting."
     exit 1
 fi
 
@@ -42,12 +46,20 @@ fi
 LOCKFILE="/var/run/${SCRIPT_NAME}.${SCRIPT_INTERFACE}.lock"
 RETRY_COUNT=${2:-0}
 
-# On first execution, redirect all stdout and stderr to syslog (for devd visibility).
+# On first execution, ensure single instance using a simple PID-based lockfile.
 if [ "$RETRY_COUNT" -eq 0 ]; then
-    # Check if another instance is running.
-    exec 9>"$LOCKFILE" || exit 1
-    lockf -s -t 0 9 || exit 0
-    trap 'exec 9>&-; rm -f "$LOCKFILE"' INT TERM EXIT
+    if [ -e "$LOCKFILE" ]; then
+        OLDPID=$(cat "$LOCKFILE" 2>/dev/null || echo "")
+        if [ -n "$OLDPID" ] && kill -0 "$OLDPID" 2>/dev/null; then
+            log_err "Lockfile exists and process $OLDPID is still running. Exiting."
+            exit 0
+        fi
+        log "Stale lockfile found. Removing..."
+        rm -f "$LOCKFILE"
+    fi
+
+    trap 'rm -f "$LOCKFILE"; exec 1>&- 2>&-' INT TERM HUP EXIT
+    echo $$ >"$LOCKFILE"
 
     exec 1> >(logger -t "$SCRIPT_NAME" -p daemon.notice) \
     2> >(logger -t "$SCRIPT_NAME" -p daemon.err)
@@ -62,20 +74,20 @@ MAX_RETRIES=10     # Maximum number of retries.
 # Dynamically determine the location of curl.
 CURL=$(command -v curl)
 if [ -z "$CURL" ]; then
-    echo "Error: curl not found in PATH. Exiting."
+    log_err "Error: curl not found in PATH. Exiting."
     exit 1
 fi
 
 # Error handler: log a message and, if under MAX_RETRIES, re-executes the script with the original "$@".
 handle_error() {
-    echo "Error encountered at line $1 (retry $RETRY_COUNT of $MAX_RETRIES)"
+    log_err "Error encountered at line $1 (retry $RETRY_COUNT of $MAX_RETRIES)"
     if [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; then
         RETRY_COUNT=$((RETRY_COUNT + 1))
-        echo "Retrying in 2 seconds... (Retry $RETRY_COUNT of $MAX_RETRIES)"
+        log "Retrying in 2 seconds... (Retry $RETRY_COUNT of $MAX_RETRIES)"
         sleep 2
         exec "$0" "$SCRIPT_INTERFACE" "$RETRY_COUNT"
     else
-        echo "Maximum retries reached. Exiting."
+        log_err "Maximum retries reached. Exiting."
         rm -f "$LOCKFILE"
         exit 1
     fi
@@ -89,7 +101,7 @@ if [ -f /usr/local/etc/.gateway-env.conf ]; then
     # Using "source ... || false" to ensure a failure can be caught for retries.
     source /usr/local/etc/.gateway-env.conf || false
 else
-    echo "Error: /usr/local/etc/.gateway-env.conf not found."
+    log_err "Error: /usr/local/etc/.gateway-env.conf not found."
     exit 1
 fi
 
@@ -99,31 +111,31 @@ fi
 
 # Ensure the webhook URL is defined.
 if [ -z "${WEBHOOK_URL:-}" ]; then
-    echo "Error: WEBHOOK_URL must be set in /usr/local/etc/.gateway-env.conf."
+    log_err "Error: WEBHOOK_URL must be set in /usr/local/etc/.gateway-env.conf."
     exit 1
 fi
 
-echo "Starting tether bridge setup for interface: $SCRIPT_INTERFACE into bridge: $BRIDGE_INTERFACE"
+log "Starting tether bridge setup for interface: $SCRIPT_INTERFACE into bridge: $BRIDGE_INTERFACE"
 
 # Verify the specified interface exists. Sometimes it isn't available immediately.
 if ! ifconfig "$SCRIPT_INTERFACE" >/dev/null 2>&1; then
-    echo "Error: Interface $SCRIPT_INTERFACE does not exist."
+    log_err "Error: Interface $SCRIPT_INTERFACE does not exist."
     false
 fi
 
 # Add the interface to the bridge if it's not already a member.
 if ! ifconfig "$BRIDGE_INTERFACE" | grep -qw "$SCRIPT_INTERFACE"; then
     ifconfig "$BRIDGE_INTERFACE" addm "$SCRIPT_INTERFACE"
-    echo "Added interface $SCRIPT_INTERFACE to bridge $BRIDGE_INTERFACE"
+    log "Added interface $SCRIPT_INTERFACE to bridge $BRIDGE_INTERFACE"
 else
-    echo "Interface $SCRIPT_INTERFACE is already a member of bridge $BRIDGE_INTERFACE"
+    log "Interface $SCRIPT_INTERFACE is already a member of bridge $BRIDGE_INTERFACE"
 fi
 
 # Bring the interface up.
 ifconfig "$SCRIPT_INTERFACE" up
 
 # Restart the DHCP client service on the bridge.
-echo "Restarting DHCP client on bridge $BRIDGE_INTERFACE..."
+log "Restarting DHCP client on bridge $BRIDGE_INTERFACE..."
 service dhclient restart "$BRIDGE_INTERFACE"
 
 # Poll for an IPv4 or non-link-local IPv6 address on the bridge.
@@ -142,7 +154,7 @@ while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
 done
 
 if [ -z "$IPV4" ] && [ -z "$IPV6" ]; then
-    echo "Error: Failed to acquire an IP address on bridge $BRIDGE_INTERFACE after $IP_TIMEOUT seconds."
+    log_err "Error: Failed to acquire an IP address on bridge $BRIDGE_INTERFACE after $IP_TIMEOUT seconds."
     false
 fi
 
@@ -164,7 +176,7 @@ while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
 done
 
 if [ -z "$DEFAULT_GW_IPV4" ] && [ -z "$DEFAULT_GW_IPV6" ]; then
-    echo "Error: Failed to acquire a default gateway on interface $SCRIPT_INTERFACE after $GATEWAY_TIMEOUT seconds."
+    log_err "Error: Failed to acquire a default gateway on interface $SCRIPT_INTERFACE after $GATEWAY_TIMEOUT seconds."
     false
 fi
 
@@ -187,10 +199,10 @@ if [ -n "$EXT_IP" ]; then
 fi
 
 # Send the Discord notification.
-echo "Sending Discord notification with the following message: $DISCORD_MESSAGE"
+log "Sending Discord notification with the following message: $DISCORD_MESSAGE"
 "$CURL" -s --retry 5 --retry-delay 5 -X POST -H "Content-Type: application/json" \
     -d "{\"content\": \"${DISCORD_MENTION} ${DISCORD_MESSAGE}\"}" \
     "$WEBHOOK_URL"
 
-echo "Notification sent successfully."
+log "Notification sent successfully."
 rm -f "$LOCKFILE"
