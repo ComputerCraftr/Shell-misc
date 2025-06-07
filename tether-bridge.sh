@@ -123,16 +123,16 @@ if ! ifconfig "$SCRIPT_INTERFACE" >/dev/null 2>&1; then
     false
 fi
 
+# Bring the interface up.
+ifconfig "$SCRIPT_INTERFACE" up
+
 # Add the interface to the bridge if it's not already a member.
 if ! ifconfig "$BRIDGE_INTERFACE" | grep -qw "$SCRIPT_INTERFACE"; then
-    ifconfig "$BRIDGE_INTERFACE" addm "$SCRIPT_INTERFACE"
+    ifconfig "$BRIDGE_INTERFACE" addm "$SCRIPT_INTERFACE" up
     log "Added interface $SCRIPT_INTERFACE to bridge $BRIDGE_INTERFACE"
 else
     log "Interface $SCRIPT_INTERFACE is already a member of bridge $BRIDGE_INTERFACE"
 fi
-
-# Bring the interface up.
-ifconfig "$SCRIPT_INTERFACE" up
 
 # Restart the DHCP client service on the bridge.
 log "Restarting DHCP client on bridge $BRIDGE_INTERFACE..."
@@ -193,7 +193,7 @@ if [ -n "$DEFAULT_GW_IPV4" ] || [ -n "$DEFAULT_GW_IPV6" ]; then
 fi
 
 # Build the external IP information string.
-EXT_IP=$("$CURL" -s --retry 5 --retry-delay 5 https://ifconfig.me)
+EXT_IP=$("$CURL" -s --retry 5 --retry-delay 5 https://ifconfig.co)
 if [ -n "$EXT_IP" ]; then
     DISCORD_MESSAGE="${DISCORD_MESSAGE}External IP:\`\`\`$EXT_IP\`\`\`"
 fi

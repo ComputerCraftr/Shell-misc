@@ -189,11 +189,10 @@ sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
     -e "s|__PROXY_AUTH_FILE__|$OVPN_PROXY_AUTH|" \
     "$OVPN_TEMPL" >"$OVPN_FILE"
 
-# Restart ipfw, OpenVPN, and DHCP services.
-log "Restarting ipfw, OpenVPN client, and DHCP server..."
+# Restart ipfw and OpenVPN services.
+log "Restarting ipfw and OpenVPN client..."
 service ipfw restart
 service openvpn restart
-service kea restart
 
 # Build the IP information string.
 DISCORD_MESSAGE="\`$(date)\` - \`${SCRIPT_INTERFACE}\` acquired IP address(es):"
@@ -226,7 +225,7 @@ if [ -z "$OVPN_IPV4" ]; then
 fi
 
 # Build the external IP information string.
-EXT_IP=$("$CURL" -s --retry 5 --retry-delay 5 https://ifconfig.me)
+EXT_IP=$("$CURL" -s --retry 5 --retry-delay 5 https://ifconfig.co)
 if [ -n "$EXT_IP" ]; then
     DISCORD_MESSAGE="${DISCORD_MESSAGE}External IP:\`\`\`$EXT_IP\`\`\`"
 fi
