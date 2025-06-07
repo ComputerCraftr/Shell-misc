@@ -1,0 +1,28 @@
+[Unit]
+Description=Forward 127.0.0.1:9050 to 10.1.0.1:9050 for apt-transport-tor
+After=network.target
+
+[Service]
+User=debian-tor
+ExecStart=/usr/bin/socat TCP-LISTEN:9050,fork,reuseaddr,bind=127.0.0.1 TCP:10.1.0.1:9050
+
+# Hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=full
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+RestrictRealtime=yes
+SystemCallFilter=@system-service
+CapabilityBoundingSet=~CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
