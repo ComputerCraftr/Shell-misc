@@ -194,7 +194,12 @@ fi
 
 # Build the external IP information string.
 EXT_IP=$("$CURL" -s --retry 5 --retry-delay 5 https://ifconfig.co)
-if [ -n "$EXT_IP" ]; then
+
+# If the external IP is not usable, log a message and retry.
+if [ -z "$EXT_IP" ] || [[ "$EXT_IP" =~ "^102\.129\.252\.[0-9]+$" ]]; then
+    log_err "Error: External IP is not usable: '$EXT_IP'"
+    false
+else
     DISCORD_MESSAGE="${DISCORD_MESSAGE}External IP:\`\`\`$EXT_IP\`\`\`"
 fi
 
