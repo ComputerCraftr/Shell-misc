@@ -1,0 +1,4 @@
+#!/bin/sh
+# Update all packages
+xbps-install -Syu
+flatpak update --noninteractive
