@@ -225,7 +225,7 @@ if [ -z "$OVPN_IPV4" ]; then
 fi
 
 # Build the external IP information string.
-EXT_IP=$("$CURL" -s --retry 5 --retry-delay 5 https://ifconfig.co)
+EXT_IP=$("$CURL" -4 -s --retry 5 --retry-delay 5 https://ifconfig.co)
 
 # If the external IP is not usable, log a message and retry.
 if [ -z "$EXT_IP" ] || [[ "$EXT_IP" =~ ^102\.129\.252\.[0-9]+$ ]]; then
