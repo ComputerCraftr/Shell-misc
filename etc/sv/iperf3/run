@@ -1,0 +1,2 @@
+#!/bin/sh
+exec chpst -u iperf3 iperf3 -s

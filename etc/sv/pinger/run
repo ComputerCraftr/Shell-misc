@@ -1,0 +1,58 @@
+#!/bin/sh
+# runit service "pinger": keepalives & latency logging
+# -------------------------------------------------------------
+# Location: /etc/sv/pinger/run
+# Service account: pinger
+#
+# Prerequisites (run once as root):
+#   pw useradd -n pinger -c "pinger service" -s /usr/sbin/nologin -d /nonexistent -w no
+#   mkdir -p /var/db/pinger && chown -R pinger:pinger /var/db/pinger
+#   mkdir -p /etc/sv/pinger/env && chmod -R 755 /etc/sv/pinger && \
+#     echo "RING_BUFFER_DAYS=7" > /etc/sv/pinger/env/RING_BUFFER_DAYS && \
+#     echo "TARGET=2001:470:20::2" > /etc/sv/pinger/env/TARGET
+#
+# Enable service: ln -s /etc/sv/pinger /var/service/
+
+# Drop privileges to pinger if not already running as pinger
+current_user=$(id -un)
+if [ "$current_user" != "pinger" ]; then
+    exec chpst -u pinger /bin/sh "$0" "$@"
+fi
+
+# Now running as pinger user
+# Load configuration from env/
+: "${RING_BUFFER_DAYS:=$(cat /etc/sv/pinger/env/RING_BUFFER_DAYS 2>/dev/null || echo 7)}"
+: "${TARGET:=$(cat /etc/sv/pinger/env/TARGET 2>/dev/null || echo 2001:470:20::2)}"
+RING_BUFFER_SIZE=$((RING_BUFFER_DAYS * 86400))
+DB="/var/db/pinger/pings.db"
+
+# Ensure database and schema (owner = pinger)
+sqlite3 "$DB" <<EOF
+CREATE TABLE IF NOT EXISTS pings (
+    slot       INTEGER PRIMARY KEY,
+    ts         DATETIME DEFAULT CURRENT_TIMESTAMP,
+    latency_ms REAL    NOT NULL
+);
+EOF
+
+# Resume slot = (last_slot +1) % size
+last_slot=$(sqlite3 "$DB" 'SELECT slot FROM pings ORDER BY ts DESC LIMIT 1;')
+case "$last_slot" in
+'' | *[!0-9]*) slot=0 ;;                           # start at zero if empty or invalid
+*) slot=$(((last_slot + 1) % RING_BUFFER_SIZE)) ;; # wrap
+esac
+
+# Main loop: ping + log + advance
+while :; do
+    # 1s timeout to avoid hangs
+    rtt=$(timeout 1 ping6 -c 1 -q "$TARGET" 2>/dev/null |
+        awk -F/ '/round-trip/ {print $5}')
+
+    if [ -n "$rtt" ]; then
+        sqlite3 "$DB" \
+            "INSERT OR REPLACE INTO pings (slot, latency_ms) VALUES ($slot,$rtt);"
+        slot=$(((slot + 1) % RING_BUFFER_SIZE))
+    fi
+
+    sleep 1
+done
