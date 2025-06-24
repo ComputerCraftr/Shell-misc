@@ -3,7 +3,7 @@ set -eu
 
 # CONFIGURATION
 KEY_DEV="/dev/mapper/luks_keystore"
-LUKS_SRC="/dev/nvme0n1p2"  # Adjust if different
+LUKS_DEV="/dev/nvme0n1p2" # Adjust if different
 MNT_BASE="/mnt/keystore"
 MNT_SBCTL="/var/lib/sbctl/keys"
 
@@ -12,18 +12,29 @@ die() {
     exit 1
 }
 
+require_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        die "This script must be run as root."
+    fi
+}
+
 update_sbctl() {
     echo "[+] Updating sbctl..."
-    xbps-install -Sy sbctl || die "Failed to update sbctl"
+    if command -v torsocks >/dev/null 2>&1; then
+        torsocks xbps-install -Sy sbctl || die "Failed to update sbctl via torsocks"
+    else
+        xbps-install -Sy sbctl || die "Failed to update sbctl"
+    fi
 }
 
 mount_keystore() {
     echo "[+] Opening LUKS and mounting keystore..."
+    mkdir -p "$MNT_BASE" "$MNT_SBCTL"
     if [ ! -e "$KEY_DEV" ]; then
-        cryptsetup open "$LUKS_SRC" luks_keystore || die "Failed to open LUKS"
+        cryptsetup open "$LUKS_DEV" luks_keystore || die "Failed to open LUKS"
     fi
-    mount "$KEY_DEV" "$MNT_BASE"
-    mount -o ro --bind "$MNT_BASE/secureboot" "$MNT_SBCTL"
+    mount "$KEY_DEV" "$MNT_BASE" || die "Failed to mount keystore"
+    mount -o ro --bind "$MNT_BASE/secureboot" "$MNT_SBCTL" || die "Failed to mount sbctl keys"
 }
 
 unmount_keystore() {
@@ -36,23 +47,23 @@ run_sbctl_tasks() {
     echo "[+] Running sbctl tasks..."
     sbctl status
     sbctl verify
-    sbctl sign-all
-    echo "[✓] sbctl signing complete."
+    echo "[✓] sbctl verification complete."
 }
 
 # MAIN ENTRY
-case "${1:-}" in
-    --mount)
-        update_sbctl
-        mount_keystore
-        run_sbctl_tasks
-        ;;
-    --unmount)
-        unmount_keystore
-        ;;
-    *)
-        echo "Usage: $0 --mount | --unmount"
-        exit 1
-        ;;
-esac
+require_root
 
+case "${1:-}" in
+--mount)
+    update_sbctl
+    mount_keystore
+    run_sbctl_tasks
+    ;;
+--unmount)
+    unmount_keystore
+    ;;
+*)
+    echo "Usage: $0 --mount | --unmount"
+    exit 1
+    ;;
+esac
