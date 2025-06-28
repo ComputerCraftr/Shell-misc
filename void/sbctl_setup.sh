@@ -46,8 +46,19 @@ unmount_keystore() {
 run_sbctl_tasks() {
     echo "[+] Running sbctl tasks..."
     sbctl status
-    sbctl verify
-    echo "[✓] sbctl verification complete."
+
+    found=0
+    for f in /boot/vmlinuz*; do
+        [ -e "$f" ] || continue
+        sbctl verify "$f" || die "sbctl failed on $f"
+        found=1
+    done
+
+    if [ "$found" -eq 1 ]; then
+        echo "[✓] sbctl verification complete."
+    else
+        echo "[!] No kernel images found in /boot to verify."
+    fi
 }
 
 # MAIN ENTRY
