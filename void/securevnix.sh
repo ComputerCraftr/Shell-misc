@@ -11,6 +11,8 @@ sudo ln -sf /etc/sv/nanoklogd /var/service
 sudo ln -sf /etc/sv/cronie /var/service
 sudo ln -sf /etc/sv/chronyd /var/service
 
+sudo sh -c 'echo integrity > /sys/kernel/security/lockdown'
+
 mkdir -p ~/.ssh
 chmod 700 ~/.ssh
 ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''
