@@ -194,7 +194,7 @@ sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
 # Restart ipfw and OpenVPN services.
 log "Restarting ipfw and OpenVPN client..."
 service ipfw restart
-service openvpn restart
+service openvpn onerestart
 
 # Build the IP information string.
 DISCORD_MESSAGE="\`$(date)\` - \`${SCRIPT_INTERFACE}\` acquired IP address(es):"
