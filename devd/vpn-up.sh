@@ -71,7 +71,7 @@ OVPN_FILE=/usr/local/etc/openvpn/pia.ovpn
 OVPN_AUTH=/usr/local/etc/openvpn/.vpn-creds
 OVPN_PROXY_AUTH=/usr/local/etc/openvpn/.proxy-creds
 OVPN_PROXY_PORT=$(tail -n 1 "$OVPN_PROXY_AUTH" || echo 0)
-OVPN_INTERFACE=$(awk '/dev / {print $2; exit}' <"$OVPN_TEMPL")
+OVPN_INTERFACE=$(awk '/dev / {print $2}' <"$OVPN_TEMPL")
 IP_TIMEOUT=10      # Total seconds to wait for an IP address.
 GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
@@ -147,10 +147,12 @@ IPV4=""
 IPV6=""
 
 while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
-    IPV4=$(ifconfig "$SCRIPT_INTERFACE" | awk '/inet / {print $2; exit}')
-    IPV6=$(ifconfig "$SCRIPT_INTERFACE" | awk '/inet6 / && $2 !~ /^fe80/ {print $2; exit}')
-    if [ -n "$IPV4" ] || [ -n "$IPV6" ]; then
-        break
+    if ifconfig "$SCRIPT_INTERFACE" >/dev/null 2>&1; then
+        IPV4=$(ifconfig "$SCRIPT_INTERFACE" | awk '/inet / {print $2}')
+        IPV6=$(ifconfig "$SCRIPT_INTERFACE" | awk '/inet6 / && $2 !~ /^fe80/ {print $2}')
+        if [ -n "$IPV4" ] || [ -n "$IPV6" ]; then
+            break
+        fi
     fi
     sleep "$INTERVAL"
     SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
@@ -168,9 +170,9 @@ DEFAULT_GW_IPV6=""
 
 while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
     # For IPv4, extract the default gateway from netstat.
-    DEFAULT_GW_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $2; exit}')
+    DEFAULT_GW_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $2}')
     # For IPv6, extract the default gateway from netstat (ignoring link-local).
-    DEFAULT_GW_IPV6=$(netstat -rn -f inet6 2>/dev/null | awk '$1 == "default" {print $2; exit}')
+    DEFAULT_GW_IPV6=$(netstat -rn -f inet6 2>/dev/null | awk '$1 == "default" {print $2}')
     if [ -n "$DEFAULT_GW_IPV4" ]; then
         break
     fi
@@ -211,9 +213,11 @@ SECONDS_WAITED=0
 OVPN_IPV4=""
 
 while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
-    OVPN_IPV4=$(ifconfig "$OVPN_INTERFACE" | awk '/inet / {print $2; exit}')
-    if [ -n "$OVPN_IPV4" ]; then
-        break
+    if ifconfig "$OVPN_INTERFACE" >/dev/null 2>&1; then
+        OVPN_IPV4=$(ifconfig "$OVPN_INTERFACE" | awk '/inet / {print $2}')
+        if [ -n "$OVPN_IPV4" ]; then
+            break
+        fi
     fi
     sleep "$INTERVAL"
     SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
@@ -238,7 +242,7 @@ fi
 # Bring up IPv6 gateway tunnel if available.
 if [ -n "$GIF_INTERFACE" ] && [ -n "$BRIDGE_INTERFACE" ] && [ -n "$GIF_UPDATE_URL" ]; then
     # Calculate MTU - 20 bytes for 6in4 overhead.
-    GIF_MTU=$(($(ifconfig "$OVPN_INTERFACE" | awk '/mtu/ {print $NF; exit}') - 20))
+    GIF_MTU=$(($(ifconfig "$OVPN_INTERFACE" | awk '/mtu / {print $NF}') - 20))
 
     # Bring up the 6in4 tunnel.
     ifconfig "$GIF_INTERFACE" tunnel "$OVPN_IPV4" "$GIF_IPV4_SERVER" mtu "$GIF_MTU"

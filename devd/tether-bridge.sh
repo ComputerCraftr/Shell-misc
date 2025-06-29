@@ -144,8 +144,8 @@ IPV4=""
 IPV6=""
 
 while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
-    IPV4=$(ifconfig "$BRIDGE_INTERFACE" | awk '/inet / {print $2; exit}')
-    IPV6=$(ifconfig "$BRIDGE_INTERFACE" | awk '/inet6 / && $2 !~ /^fe80/ {print $2; exit}')
+    IPV4=$(ifconfig "$BRIDGE_INTERFACE" | awk '/inet / {print $2}')
+    IPV6=$(ifconfig "$BRIDGE_INTERFACE" | awk '/inet6 / && $2 !~ /^fe80/ {print $2}')
     if [ -n "$IPV4" ] || [ -n "$IPV6" ]; then
         break
     fi
@@ -165,9 +165,9 @@ DEFAULT_GW_IPV6=""
 
 while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
     # For IPv4, extract the default gateway from netstat.
-    DEFAULT_GW_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $2; exit}')
+    DEFAULT_GW_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $2}')
     # For IPv6, extract the default gateway from netstat (ignoring link-local).
-    DEFAULT_GW_IPV6=$(netstat -rn -f inet6 2>/dev/null | awk '$1 == "default" {print $2; exit}')
+    DEFAULT_GW_IPV6=$(netstat -rn -f inet6 2>/dev/null | awk '$1 == "default" {print $2}')
     if [ -n "$DEFAULT_GW_IPV4" ] || [ -n "$DEFAULT_GW_IPV6" ]; then
         break
     fi
