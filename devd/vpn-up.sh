@@ -194,7 +194,8 @@ sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
 # Restart ipfw and OpenVPN services.
 log "Restarting ipfw and OpenVPN client..."
 service ipfw restart
-service openvpn onerestart
+service openvpn onestop || true
+service openvpn onestart
 
 # Build the IP information string.
 DISCORD_MESSAGE="\`$(date)\` - \`${SCRIPT_INTERFACE}\` acquired IP address(es):"
@@ -229,7 +230,7 @@ if [ -z "$OVPN_IPV4" ]; then
 fi
 
 # Build the external IP information string.
-EXT_IP=$("$CURL" -4 -s --retry 5 --retry-delay 5 https://ifconfig.co)
+EXT_IP=$("$CURL" -s --retry 5 --retry-delay 5 -4 https://ifconfig.co)
 
 # If the external IP is not usable, log a message and retry.
 if [ -z "$EXT_IP" ] || [[ "$EXT_IP" =~ ^102\.129\.252\.[0-9]+$ ]]; then
@@ -250,7 +251,7 @@ if [ -n "$GIF_INTERFACE" ] && [ -n "$BRIDGE_INTERFACE" ] && [ -n "$GIF_UPDATE_UR
     ifconfig "$BRIDGE_INTERFACE" inet6 "$GIF_IPV6_LOCAL" prefixlen 64 up
 
     # Update the external IP.
-    "$CURL" -s --retry 5 --retry-delay 5 -X GET \
+    "$CURL" -s --retry 5 --retry-delay 5 -4 -X GET \
         -H "Cache-Control: no-cache, no-store, must-revalidate" \
         "$GIF_UPDATE_URL&myip=$EXT_IP"
 
@@ -265,7 +266,7 @@ fi
 
 # Send the Discord notification.
 log "Sending Discord notification with the following message: $DISCORD_MESSAGE"
-"$CURL" -s --retry 5 --retry-delay 5 -X POST -H "Content-Type: application/json" \
+"$CURL" -s --retry 5 --retry-delay 5 -4 -X POST -H "Content-Type: application/json" \
     -d "{\"content\": \"${DISCORD_MENTION} ${DISCORD_MESSAGE}\"}" \
     "$WEBHOOK_URL"
 
