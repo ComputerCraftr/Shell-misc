@@ -44,9 +44,8 @@ esac
 
 # Main loop: ping + log + advance
 while :; do
-    # 1s timeout to avoid hangs
-    rtt=$(timeout 1 ping6 -c 1 -q "$TARGET" 2>/dev/null |
-        awk -F/ '/round-trip/ {print $5}')
+    # Ping with native timeout; parse average RTT from min/avg/max line
+    rtt=$(ping6 -c 1 -W 1 -q "$TARGET" 2>/dev/null | awk -F/ '/[Mm]in\/avg\/max/ {print $5}')
 
     if [ -n "$rtt" ]; then
         sqlite3 "$DB" \
