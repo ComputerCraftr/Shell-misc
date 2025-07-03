@@ -75,7 +75,8 @@ OVPN_INTERFACE=$(awk '/dev / {print $2}' <"$OVPN_TEMPL")
 IP_TIMEOUT=10      # Total seconds to wait for an IP address.
 GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
-MAX_RETRIES=10     # Maximum number of retries.
+MAX_RETRIES=20     # Maximum number of retries.
+RETRY_TIMEOUT=10   # Total seconds to wait between retries.
 
 # Dynamically determine the location of curl.
 CURL=$(command -v curl)
@@ -95,8 +96,8 @@ handle_error() {
     log_err "Error encountered at line $1 (retry $RETRY_COUNT of $MAX_RETRIES)"
     if [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; then
         RETRY_COUNT=$((RETRY_COUNT + 1))
-        log "Retrying in 2 seconds... (Retry $RETRY_COUNT of $MAX_RETRIES)"
-        sleep 2
+        log "Retrying in $RETRY_TIMEOUT seconds... (Retry $RETRY_COUNT of $MAX_RETRIES)"
+        sleep "$RETRY_TIMEOUT"
         exec "$0" "$SCRIPT_INTERFACE" "$RETRY_COUNT"
     else
         log_err "Maximum retries reached. Exiting."
@@ -193,9 +194,11 @@ sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
 
 # Restart ipfw and OpenVPN services.
 log "Restarting ipfw and OpenVPN client..."
-service ipfw restart
-service openvpn onestop || true
-service openvpn onestart
+if ! ipfw list | grep -qwF "$SCRIPT_INTERFACE" || ! ipfw list | grep -qwF "$OVPN_INTERFACE"; then
+    # Restart ipfw if we need to detect and apply rules on a new interface
+    service ipfw restart
+fi
+service openvpn onerestart
 
 # Build the IP information string.
 DISCORD_MESSAGE="\`$(date)\` - \`${SCRIPT_INTERFACE}\` acquired IP address(es):"
@@ -242,6 +245,11 @@ fi
 
 # Bring up IPv6 gateway tunnel if available.
 if [ -n "$GIF_INTERFACE" ] && [ -n "$BRIDGE_INTERFACE" ] && [ -n "$GIF_UPDATE_URL" ]; then
+    # Update the external IP.
+    "$CURL" -s --retry 5 --retry-delay 5 -4 -X GET \
+        -H "Cache-Control: no-cache, no-store, must-revalidate" \
+        "$GIF_UPDATE_URL&myip=$EXT_IP"
+
     # Calculate MTU - 20 bytes for 6in4 overhead.
     GIF_MTU=$(($(ifconfig "$OVPN_INTERFACE" | awk '/mtu / {print $NF}') - 20))
 
@@ -249,11 +257,6 @@ if [ -n "$GIF_INTERFACE" ] && [ -n "$BRIDGE_INTERFACE" ] && [ -n "$GIF_UPDATE_UR
     ifconfig "$GIF_INTERFACE" tunnel "$OVPN_IPV4" "$GIF_IPV4_SERVER" mtu "$GIF_MTU"
     ifconfig "$GIF_INTERFACE" inet6 "$GIF_IPV6_CLIENT" "$GIF_IPV6_SERVER" prefixlen 128 up
     ifconfig "$BRIDGE_INTERFACE" inet6 "$GIF_IPV6_LOCAL" prefixlen 64 up
-
-    # Update the external IP.
-    "$CURL" -s --retry 5 --retry-delay 5 -4 -X GET \
-        -H "Cache-Control: no-cache, no-store, must-revalidate" \
-        "$GIF_UPDATE_URL&myip=$EXT_IP"
 
     # Set the default IPv6 route.
     route -n delete -inet6 default || true
