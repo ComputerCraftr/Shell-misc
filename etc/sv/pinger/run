@@ -13,10 +13,10 @@
 #
 # Enable service: ln -s /etc/sv/pinger /var/service/
 
-# Exit on unset variables or errors for reliability and safety
+# Exit on unset variables and errors
 set -eu
 
-# Drop privileges to pinger if not already running as pinger
+# Drop privileges if needed
 current_user=$(id -un)
 if [ "$current_user" != "pinger" ]; then
     exec chpst -u pinger /bin/sh "$0" "$@"
@@ -28,10 +28,10 @@ fi
 RING_BUFFER_SIZE=$((RING_BUFFER_DAYS * 86400))
 DB="/var/db/pinger/pings.db"
 
-# Sleep for a startup delay to keep ts unique
+# Startup delay to ensure unique integer-second timestamps
 sleep 1
 
-# Initialize database and schema
+# Initialize database schema (run once per connection will persist WAL mode)
 sqlite3 "$DB" <<EOF
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
@@ -56,12 +56,17 @@ while :; do
     rtt=$(ping6 -c 1 -W 1 -q "$TARGET" 2>/dev/null | awk -F/ '/[Mm]in\/avg\/max/ {print $5}')
 
     if [ -n "$rtt" ]; then
-        if sqlite3 "$DB" \
-            "INSERT INTO pings (slot, latency_ms) VALUES ($slot, $rtt) \
-             ON CONFLICT(slot) DO UPDATE SET ts = CURRENT_TIMESTAMP, latency_ms = excluded.latency_ms;"; then
+        # Use targeted UPSERT on slot; UNIQUE(ts) catches duplicate timestamps
+        if sqlite3 "$DB" "\
+PRAGMA synchronous = NORMAL;
+INSERT INTO pings(slot, latency_ms)
+  VALUES ($slot, $rtt)
+  ON CONFLICT(slot) DO UPDATE SET
+    ts         = CURRENT_TIMESTAMP,
+    latency_ms = excluded.latency_ms;"; then
             slot=$(((slot + 1) % RING_BUFFER_SIZE))
         else
-            echo "[pinger] ERROR: Could not insert at slot $slot (possible duplicate timestamp)" >&2
+            echo "[pinger] ERROR: duplicate timestamp or write failure at slot $slot" >&2
         fi
     fi
 
