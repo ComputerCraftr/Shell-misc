@@ -69,7 +69,8 @@ fi
 IP_TIMEOUT=10      # Total seconds to wait for an IP address.
 GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
-MAX_RETRIES=10     # Maximum number of retries.
+MAX_RETRIES=20     # Maximum number of retries.
+RETRY_TIMEOUT=10   # Total seconds to wait between retries.
 
 # Dynamically determine the location of curl.
 CURL=$(command -v curl)
@@ -83,8 +84,8 @@ handle_error() {
     log_err "Error encountered at line $1 (retry $RETRY_COUNT of $MAX_RETRIES)"
     if [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; then
         RETRY_COUNT=$((RETRY_COUNT + 1))
-        log "Retrying in 2 seconds... (Retry $RETRY_COUNT of $MAX_RETRIES)"
-        sleep 2
+        log "Retrying in $RETRY_TIMEOUT seconds... (Retry $RETRY_COUNT of $MAX_RETRIES)"
+        sleep "$RETRY_TIMEOUT"
         exec "$0" "$EXT_IF" "$RETRY_COUNT"
     else
         log_err "Maximum retries reached. Exiting."
@@ -134,27 +135,29 @@ else
     log "Interface $EXT_IF is already a member of bridge $INT_IF"
 fi
 
-# Restart the DHCP client service on the bridge.
-log "Restarting DHCP client on bridge $INT_IF..."
+# Restart the DHCP client service on the interface.
+log "Restarting DHCP client on interface $INT_IF..."
 service dhclient restart "$INT_IF"
 
-# Poll for an IPv4 or non-link-local IPv6 address on the bridge.
+# Poll for an IPv4 or non-link-local IPv6 address on the interface.
 SECONDS_WAITED=0
 IPV4=""
 IPV6=""
 
 while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
-    IPV4=$(ifconfig "$INT_IF" | awk '/inet / {print $2}')
-    IPV6=$(ifconfig "$INT_IF" | awk '/inet6 / && $2 !~ /^fe80/ {print $2}')
-    if [ -n "$IPV4" ] || [ -n "$IPV6" ]; then
-        break
+    if ifconfig "$INT_IF" >/dev/null 2>&1; then
+        IPV4=$(ifconfig "$INT_IF" | awk '/inet / {print $2}')
+        IPV6=$(ifconfig "$INT_IF" | awk '/inet6 / && $2 !~ /^fe80/ {print $2}')
+        if [ -n "$IPV4" ] || [ -n "$IPV6" ]; then
+            break
+        fi
     fi
     sleep "$INTERVAL"
     SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
 done
 
 if [ -z "$IPV4" ] && [ -z "$IPV6" ]; then
-    log_err "Error: Failed to acquire an IP address on bridge $INT_IF after $IP_TIMEOUT seconds."
+    log_err "Error: Failed to acquire an IP address on interface $INT_IF after $IP_TIMEOUT seconds."
     false
 fi
 
