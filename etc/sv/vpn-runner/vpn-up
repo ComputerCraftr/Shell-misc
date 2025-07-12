@@ -13,23 +13,22 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# Configuration: timeouts, intervals, and retry settings.
-OVPN_TEMPL=/usr/local/etc/openvpn/pia_template.ovpn
-TUN_IF=$(awk '/dev / {print $2}' <"$OVPN_TEMPL")
-IP_TIMEOUT=10      # Total seconds to wait for an IP address.
-GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
-INTERVAL=1         # Polling interval in seconds.
+cp /etc/resolv.conf.vpn /etc/resolv.conf
+log "Configured resolv.conf for VPN."
 
 # Load environment variables from /usr/local/etc/.gateway-env.conf config file.
 . /usr/local/etc/.gateway-env.conf
+
+# Configuration: timeouts, intervals, and retry settings.
+TUN_IF=$(awk '/dev / {print $2}' <"$OVPN_TEMPLATE")
+IP_TIMEOUT=30      # Total seconds to wait for an IP address.
+GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
+INTERVAL=1         # Polling interval in seconds.
 
 # Restart ipfw if we need to detect and apply rules on a new interface.
 if ! ipfw list | grep -qwF "$EXT_IF" || ! ipfw list | grep -qwF "$TUN_IF"; then
     service ipfw restart
 fi
-
-cp /etc/resolv.conf.vpn /etc/resolv.conf
-log "Configured resolv.conf for VPN."
 
 # Set defaults for the Discord notification if not defined.
 : "${DISCORD_MENTION:=@everyone}"
@@ -114,7 +113,7 @@ fi
 EXT_IPV4=$(curl -s --retry 5 --retry-delay 5 -4 https://ifconfig.co)
 
 # If the external IP is not usable, log a message and retry.
-if [ -z "$EXT_IPV4" ] || echo "$EXT_IPV4" | grep -Eq '^102\.129\.252\.[0-9]+$'; then
+if [ -z "$EXT_IPV4" ] || echo "$EXT_IPV4" | grep -qE '^102\.129\.252\.[0-9]+$'; then
     log_err "Error: External IP is not usable: '$EXT_IPV4'"
     EXT_IPV4=""
 else
