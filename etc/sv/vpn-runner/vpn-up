@@ -1,0 +1,155 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_NAME=vpn-up
+
+# Define logging wrapper functions.
+log() { logger -t "$SCRIPT_NAME" -p daemon.notice "$*"; }
+log_err() { logger -t "$SCRIPT_NAME" -p daemon.err "$*"; }
+
+# Ensure the script is run as root.
+if [ "$(id -u)" -ne 0 ]; then
+    log_err "Error: This script must be run as root. Exiting."
+    exit 1
+fi
+
+# Configuration: timeouts, intervals, and retry settings.
+OVPN_TEMPL=/usr/local/etc/openvpn/pia_template.ovpn
+TUN_IF=$(awk '/dev / {print $2}' <"$OVPN_TEMPL")
+IP_TIMEOUT=10      # Total seconds to wait for an IP address.
+GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
+INTERVAL=1         # Polling interval in seconds.
+
+# Load environment variables from /usr/local/etc/.gateway-env.conf config file.
+. /usr/local/etc/.gateway-env.conf
+
+# Restart ipfw if we need to detect and apply rules on a new interface.
+if ! ipfw list | grep -qwF "$EXT_IF" || ! ipfw list | grep -qwF "$TUN_IF"; then
+    service ipfw restart
+fi
+
+cp /etc/resolv.conf.vpn /etc/resolv.conf
+log "Configured resolv.conf for VPN."
+
+# Set defaults for the Discord notification if not defined.
+: "${DISCORD_MENTION:=@everyone}"
+
+# Poll for an IPv4 or non-link-local IPv6 address on the interface.
+SECONDS_WAITED=0
+IPV4=""
+IPV6=""
+
+while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
+    if ifconfig "$EXT_IF" >/dev/null 2>&1; then
+        IPV4=$(ifconfig "$EXT_IF" | awk '/inet / {print $2}')
+        IPV6=$(ifconfig "$EXT_IF" | awk '/inet6 / && $2 !~ /^fe80/ {print $2}')
+        if [ -n "$IPV4" ] || [ -n "$IPV6" ]; then
+            break
+        fi
+    fi
+    sleep "$INTERVAL"
+    SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
+done
+
+if [ -z "$IPV4" ] && [ -z "$IPV6" ]; then
+    log_err "Error: Failed to acquire an IP address on interface $EXT_IF after $IP_TIMEOUT seconds."
+    false
+fi
+
+# Build the IP information string.
+DISCORD_MESSAGE="\`$(date)\` - \`${EXT_IF}\` acquired IP address(es):"
+[ -n "$IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV4\`\`\`"
+[ -n "$IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV6\`\`\`"
+
+# Poll for default gateways for IPv4 and IPv6 (using netstat).
+SECONDS_WAITED=0
+DEFAULT_GW_IPV4=""
+DEFAULT_GW_IPV6=""
+
+while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
+    # For IPv4, extract the default gateway from netstat.
+    DEFAULT_GW_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $2}')
+    # For IPv6, extract the default gateway from netstat (ignoring link-local).
+    DEFAULT_GW_IPV6=$(netstat -rn -f inet6 2>/dev/null | awk '$1 == "default" {print $2}')
+    if [ -n "$DEFAULT_GW_IPV4" ]; then
+        break
+    fi
+    sleep "$INTERVAL"
+    SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
+done
+
+if [ -z "$DEFAULT_GW_IPV4" ]; then
+    log_err "Error: Failed to acquire a default gateway on interface $EXT_IF after $GATEWAY_TIMEOUT seconds."
+    false
+fi
+
+# Build the default gateway information string.
+if [ -n "$DEFAULT_GW_IPV4" ] || [ -n "$DEFAULT_GW_IPV6" ]; then
+    DISCORD_MESSAGE="${DISCORD_MESSAGE}Default Gateway(s):"
+    [ -n "$DEFAULT_GW_IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV4\`\`\`"
+    [ -n "$DEFAULT_GW_IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV6\`\`\`"
+fi
+
+# Poll for an IPv4 address on the tunnel interface.
+SECONDS_WAITED=0
+TUN_IPV4=""
+
+while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
+    if ifconfig "$TUN_IF" >/dev/null 2>&1; then
+        TUN_IPV4=$(ifconfig "$TUN_IF" | awk '/inet / {print $2}')
+        if [ -n "$TUN_IPV4" ]; then
+            break
+        fi
+    fi
+    sleep "$INTERVAL"
+    SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
+done
+
+if [ -z "$TUN_IPV4" ]; then
+    log_err "Error: Failed to acquire an IP address on tunnel interface $TUN_IF after $IP_TIMEOUT seconds."
+    false
+fi
+
+# Build the external IP information string.
+EXT_IPV4=$(curl -s --retry 5 --retry-delay 5 -4 https://ifconfig.co)
+
+# If the external IP is not usable, log a message and retry.
+if [ -z "$EXT_IPV4" ] || echo "$EXT_IPV4" | grep -Eq '^102\.129\.252\.[0-9]+$'; then
+    log_err "Error: External IP is not usable: '$EXT_IPV4'"
+    EXT_IPV4=""
+else
+    DISCORD_MESSAGE="${DISCORD_MESSAGE}External IP:\`\`\`$EXT_IPV4\`\`\`"
+fi
+
+# Bring up IPv6 gateway tunnel if available.
+if [ -n "$EXT_IPV4" ] && [ -n "$GIF_IF" ] && [ -n "$INT_IF" ] && [ -n "$GIF_UPDATE_URL" ]; then
+    # Update the external IP.
+    curl -s --retry 5 --retry-delay 5 -4 -X GET \
+        -H "Cache-Control: no-cache, no-store, must-revalidate" \
+        "$GIF_UPDATE_URL&myip=$EXT_IPV4"
+
+    # Calculate MTU - 20 bytes for 6in4 overhead.
+    GIF_MTU=$(($(ifconfig "$TUN_IF" | awk '/mtu / {print $NF}') - 20))
+
+    # Bring up the 6in4 tunnel.
+    ifconfig "$GIF_IF" tunnel "$TUN_IPV4" "$GIF_IPV4_SERVER" mtu "$GIF_MTU"
+    ifconfig "$GIF_IF" inet6 "$GIF_IPV6_CLIENT" "$GIF_IPV6_SERVER" prefixlen 128 up
+    ifconfig "$INT_IF" inet6 "$GIF_IPV6_LOCAL" prefixlen 64 up
+
+    # Set the default IPv6 route.
+    route -n delete -inet6 default || true
+    route -n add -inet6 default "$GIF_IPV6_SERVER"
+else
+    if [ -n "$INT_IF" ]; then
+        ifconfig "$INT_IF" inet6 "$GIF_IPV6_LOCAL" prefixlen 64 delete || true
+    fi
+    route -n delete -inet6 default || true
+fi
+
+# Send the Discord notification.
+log "Sending Discord notification with the following message: $DISCORD_MESSAGE"
+curl -s --retry 5 --retry-delay 5 -4 -X POST -H "Content-Type: application/json" \
+    -d "{\"content\": \"${DISCORD_MENTION} ${DISCORD_MESSAGE}\"}" \
+    "$WEBHOOK_URL"
+
+log "Notification sent successfully."

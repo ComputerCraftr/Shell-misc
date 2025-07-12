@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_NAME=vpn-down
+
+# Define logging wrapper functions.
+log() { logger -t "$SCRIPT_NAME" -p daemon.notice "$*"; }
+log_err() { logger -t "$SCRIPT_NAME" -p daemon.err "$*"; }
+
+# Ensure the script is run as root.
+if [ "$(id -u)" -ne 0 ]; then
+    log_err "Error: This script must be run as root. Exiting."
+    exit 1
+fi
+
+cp /etc/resolv.conf.bak /etc/resolv.conf
+log "Restored resolv.conf to default."

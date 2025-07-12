@@ -1,0 +1,76 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_NAME=vpn-runner
+
+# Define logging wrapper functions.
+log() { logger -t "$SCRIPT_NAME" -p daemon.notice "$*"; }
+log_err() { logger -t "$SCRIPT_NAME" -p daemon.err "$*"; }
+
+# Delay startup to ensure network is settled.
+sleep 10
+
+# Ensure the script is run as root.
+if [ "$(id -u)" -ne 0 ]; then
+    log_err "Error: This script must be run as root. Exiting."
+    exit 1
+fi
+
+# Configuration: timeouts, intervals, and retry settings.
+OVPN_TEMPL=/usr/local/etc/openvpn/pia_template.ovpn
+OVPN_FILE=/usr/local/etc/openvpn/pia.ovpn
+OVPN_AUTH=/usr/local/etc/openvpn/.vpn-creds
+OVPN_PROXY_AUTH=/usr/local/etc/openvpn/.proxy-creds
+OVPN_PROXY_PORT=$(tail -n 1 "${OVPN_PROXY_AUTH:-}" 2>/dev/null || echo 0)
+GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
+INTERVAL=1         # Polling interval in seconds.
+
+# Load environment variables from /usr/local/etc/.gateway-env.conf config file.
+. /usr/local/etc/.gateway-env.conf
+
+# Verify the specified interface exists. Sometimes it isn't available immediately.
+if ! ifconfig "$EXT_IF" >/dev/null 2>&1; then
+    log_err "Error: Interface $EXT_IF does not exist."
+    false
+fi
+
+# Bring the interface up.
+ifconfig "$EXT_IF" up
+
+# Restart the DHCP client service on the interface.
+service dhclient restart "$EXT_IF"
+
+# Poll for default gateways for IPv4 (using netstat).
+SECONDS_WAITED=0
+DEFAULT_GW_IPV4=""
+
+while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
+    # For IPv4, extract the default gateway from netstat.
+    DEFAULT_GW_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $2}')
+    if [ -n "$DEFAULT_GW_IPV4" ]; then
+        break
+    fi
+    sleep "$INTERVAL"
+    SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
+done
+
+if [ -z "$DEFAULT_GW_IPV4" ]; then
+    log_err "Error: Failed to acquire a default gateway on interface $EXT_IF after $GATEWAY_TIMEOUT seconds."
+    false
+fi
+
+# Update the OpenVPN configuration.
+if [ -f "${OVPN_PROXY_AUTH:-}" ]; then
+    sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
+        -e "s|__PROXY_STRING__|${DEFAULT_GW_IPV4} ${OVPN_PROXY_PORT}|" \
+        -e "s|__PROXY_AUTH_FILE__|$OVPN_PROXY_AUTH|" \
+        "$OVPN_TEMPL" >"$OVPN_FILE"
+else
+    sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
+        -e "/__PROXY_STRING__/d" \
+        -e "/__PROXY_AUTH_FILE__/d" \
+        "$OVPN_TEMPL" >"$OVPN_FILE"
+fi
+
+# Start the OpenVPN service.
+exec openvpn --syslog openvpn --config "$OVPN_FILE" --writepid /var/run/openvpn.pid
