@@ -1,0 +1,2 @@
+#!/bin/sh
+nohup /etc/sv/vpn-runner/vpn-up &
