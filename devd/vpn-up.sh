@@ -29,21 +29,21 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# Handle interface from either $SCRIPT_INTERFACE (retry) or $1 (first run).
-if [ -n "${SCRIPT_INTERFACE:-}" ]; then
+# Handle interface from either $EXT_IF (retry) or $1 (first run).
+if [ -n "${EXT_IF:-}" ]; then
     # Already exported by a retry
-    if [ "$#" -gt 0 ] && [ "$1" != "$SCRIPT_INTERFACE" ]; then
-        log "Warning: SCRIPT_INTERFACE is already set to '$SCRIPT_INTERFACE'; ignoring argument '$1'."
+    if [ "$#" -gt 0 ] && [ "$1" != "$EXT_IF" ]; then
+        log "Warning: EXT_IF is already set to '$EXT_IF'; ignoring argument '$1'."
     fi
 elif [ "$#" -gt 0 ]; then
-    export SCRIPT_INTERFACE="$1"
+    export EXT_IF="$1"
 else
-    log_err "Error: SCRIPT_INTERFACE is not set and no argument was provided. Exiting."
+    log_err "Error: EXT_IF is not set and no argument was provided. Exiting."
     exit 1
 fi
 
 # Define LOCKFILE and set RETRY_COUNT from last argument.
-LOCKFILE="/var/run/${SCRIPT_NAME}.${SCRIPT_INTERFACE}.lock"
+LOCKFILE="/var/run/${SCRIPT_NAME}.${EXT_IF}.lock"
 RETRY_COUNT=${2:-0}
 
 # On first execution, ensure single instance using a simple PID-based lockfile.
@@ -71,7 +71,7 @@ OVPN_FILE=/usr/local/etc/openvpn/pia.ovpn
 OVPN_AUTH=/usr/local/etc/openvpn/.vpn-creds
 OVPN_PROXY_AUTH=/usr/local/etc/openvpn/.proxy-creds
 OVPN_PROXY_PORT=$(tail -n 1 "$OVPN_PROXY_AUTH" || echo 0)
-OVPN_INTERFACE=$(awk '/dev / {print $2}' <"$OVPN_TEMPL")
+TUN_IF=$(awk '/dev / {print $2}' <"$OVPN_TEMPL")
 IP_TIMEOUT=10      # Total seconds to wait for an IP address.
 GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
@@ -98,7 +98,7 @@ handle_error() {
         RETRY_COUNT=$((RETRY_COUNT + 1))
         log "Retrying in $RETRY_TIMEOUT seconds... (Retry $RETRY_COUNT of $MAX_RETRIES)"
         sleep "$RETRY_TIMEOUT"
-        exec "$0" "$SCRIPT_INTERFACE" "$RETRY_COUNT"
+        exec "$0" "$EXT_IF" "$RETRY_COUNT"
     else
         log_err "Maximum retries reached. Exiting."
         rm -f "$LOCKFILE"
@@ -127,20 +127,20 @@ if [ -z "${WEBHOOK_URL:-}" ]; then
     exit 1
 fi
 
-log "Starting VPN setup for interface: $SCRIPT_INTERFACE"
+log "Starting VPN setup for interface: $EXT_IF"
 
 # Verify the specified interface exists. Sometimes it isn't available immediately.
-if ! ifconfig "$SCRIPT_INTERFACE" >/dev/null 2>&1; then
-    log_err "Error: Interface $SCRIPT_INTERFACE does not exist."
+if ! ifconfig "$EXT_IF" >/dev/null 2>&1; then
+    log_err "Error: Interface $EXT_IF does not exist."
     false
 fi
 
 # Bring the interface up.
-ifconfig "$SCRIPT_INTERFACE" up
+ifconfig "$EXT_IF" up
 
 # Restart the DHCP client service on the interface.
-log "Restarting DHCP client on interface $SCRIPT_INTERFACE..."
-service dhclient restart "$SCRIPT_INTERFACE"
+log "Restarting DHCP client on interface $EXT_IF..."
+service dhclient restart "$EXT_IF"
 
 # Poll for an IPv4 or non-link-local IPv6 address on the interface.
 SECONDS_WAITED=0
@@ -148,9 +148,9 @@ IPV4=""
 IPV6=""
 
 while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
-    if ifconfig "$SCRIPT_INTERFACE" >/dev/null 2>&1; then
-        IPV4=$(ifconfig "$SCRIPT_INTERFACE" | awk '/inet / {print $2}')
-        IPV6=$(ifconfig "$SCRIPT_INTERFACE" | awk '/inet6 / && $2 !~ /^fe80/ {print $2}')
+    if ifconfig "$EXT_IF" >/dev/null 2>&1; then
+        IPV4=$(ifconfig "$EXT_IF" | awk '/inet / {print $2}')
+        IPV6=$(ifconfig "$EXT_IF" | awk '/inet6 / && $2 !~ /^fe80/ {print $2}')
         if [ -n "$IPV4" ] || [ -n "$IPV6" ]; then
             break
         fi
@@ -160,7 +160,7 @@ while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
 done
 
 if [ -z "$IPV4" ] && [ -z "$IPV6" ]; then
-    log_err "Error: Failed to acquire an IP address on interface $SCRIPT_INTERFACE after $IP_TIMEOUT seconds."
+    log_err "Error: Failed to acquire an IP address on interface $EXT_IF after $IP_TIMEOUT seconds."
     false
 fi
 
@@ -182,7 +182,7 @@ while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
 done
 
 if [ -z "$DEFAULT_GW_IPV4" ]; then
-    log_err "Error: Failed to acquire a default gateway on interface $SCRIPT_INTERFACE after $GATEWAY_TIMEOUT seconds."
+    log_err "Error: Failed to acquire a default gateway on interface $EXT_IF after $GATEWAY_TIMEOUT seconds."
     false
 fi
 
@@ -194,14 +194,14 @@ sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
 
 # Restart ipfw and OpenVPN services.
 log "Restarting ipfw and OpenVPN client..."
-if ! ipfw list | grep -qwF "$SCRIPT_INTERFACE" || ! ipfw list | grep -qwF "$OVPN_INTERFACE"; then
+if ! ipfw list | grep -qwF "$EXT_IF" || ! ipfw list | grep -qwF "$TUN_IF"; then
     # Restart ipfw if we need to detect and apply rules on a new interface
     service ipfw restart
 fi
 service openvpn onerestart
 
 # Build the IP information string.
-DISCORD_MESSAGE="\`$(date)\` - \`${SCRIPT_INTERFACE}\` acquired IP address(es):"
+DISCORD_MESSAGE="\`$(date)\` - \`${EXT_IF}\` acquired IP address(es):"
 [ -n "$IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV4\`\`\`"
 [ -n "$IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV6\`\`\`"
 
@@ -214,12 +214,12 @@ fi
 
 # Poll for an IPv4 address on the tunnel interface.
 SECONDS_WAITED=0
-OVPN_IPV4=""
+TUN_IPV4=""
 
 while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
-    if ifconfig "$OVPN_INTERFACE" >/dev/null 2>&1; then
-        OVPN_IPV4=$(ifconfig "$OVPN_INTERFACE" | awk '/inet / {print $2}')
-        if [ -n "$OVPN_IPV4" ]; then
+    if ifconfig "$TUN_IF" >/dev/null 2>&1; then
+        TUN_IPV4=$(ifconfig "$TUN_IF" | awk '/inet / {print $2}')
+        if [ -n "$TUN_IPV4" ]; then
             break
         fi
     fi
@@ -227,8 +227,8 @@ while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
     SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
 done
 
-if [ -z "$OVPN_IPV4" ]; then
-    log_err "Error: Failed to acquire an IP address on tunnel interface $OVPN_INTERFACE after $IP_TIMEOUT seconds."
+if [ -z "$TUN_IPV4" ]; then
+    log_err "Error: Failed to acquire an IP address on tunnel interface $TUN_IF after $IP_TIMEOUT seconds."
     false
 fi
 
@@ -244,19 +244,19 @@ else
 fi
 
 # Bring up IPv6 gateway tunnel if available.
-if [ -n "$GIF_INTERFACE" ] && [ -n "$BRIDGE_INTERFACE" ] && [ -n "$GIF_UPDATE_URL" ]; then
+if [ -n "$GIF_IF" ] && [ -n "$INT_IF" ] && [ -n "$GIF_UPDATE_URL" ]; then
     # Update the external IP.
     "$CURL" -s --retry 5 --retry-delay 5 -4 -X GET \
         -H "Cache-Control: no-cache, no-store, must-revalidate" \
         "$GIF_UPDATE_URL&myip=$EXT_IP"
 
     # Calculate MTU - 20 bytes for 6in4 overhead.
-    GIF_MTU=$(($(ifconfig "$OVPN_INTERFACE" | awk '/mtu / {print $NF}') - 20))
+    GIF_MTU=$(($(ifconfig "$TUN_IF" | awk '/mtu / {print $NF}') - 20))
 
     # Bring up the 6in4 tunnel.
-    ifconfig "$GIF_INTERFACE" tunnel "$OVPN_IPV4" "$GIF_IPV4_SERVER" mtu "$GIF_MTU"
-    ifconfig "$GIF_INTERFACE" inet6 "$GIF_IPV6_CLIENT" "$GIF_IPV6_SERVER" prefixlen 128 up
-    ifconfig "$BRIDGE_INTERFACE" inet6 "$GIF_IPV6_LOCAL" prefixlen 64 up
+    ifconfig "$GIF_IF" tunnel "$TUN_IPV4" "$GIF_IPV4_SERVER" mtu "$GIF_MTU"
+    ifconfig "$GIF_IF" inet6 "$GIF_IPV6_CLIENT" "$GIF_IPV6_SERVER" prefixlen 128 up
+    ifconfig "$INT_IF" inet6 "$GIF_IPV6_LOCAL" prefixlen 64 up
 
     # Set the default IPv6 route.
     route -n delete -inet6 default || true
