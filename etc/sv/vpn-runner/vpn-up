@@ -141,13 +141,18 @@ else
     DISCORD_MESSAGE="${DISCORD_MESSAGE}External IP:\`\`\`$EXT_IPV4\`\`\`"
 fi
 
+GOOD_IPV4_REGEX=$(echo "^good $EXT_IPV4$" | sed 's/\./\\./g')
+EXT_IPV4_UPDATE=""
+
 # Bring up IPv6 gateway tunnel if available.
 if [ -n "$EXT_IPV4" ] && [ -n "$GIF_IF" ] && [ -n "$INT_IF" ] && [ -n "$GIF_UPDATE_URL" ]; then
     # Update the external IP.
-    curl -s --retry 5 --retry-delay 5 -4 -X GET \
+    EXT_IPV4_UPDATE=$(curl -s --retry 5 --retry-delay 5 -4 -X GET \
         -H "Cache-Control: no-cache, no-store, must-revalidate" \
-        "$GIF_UPDATE_URL&myip=$EXT_IPV4"
+        "$GIF_UPDATE_URL&myip=$EXT_IPV4")
+fi
 
+if echo "$EXT_IPV4_UPDATE" | grep -qE "$GOOD_IPV4_REGEX"; then
     # Calculate MTU - 20 bytes for 6in4 overhead.
     GIF_MTU=$(($(ifconfig "$TUN_IF" | awk '/mtu / {print $NF}') - 20))
 
@@ -159,11 +164,17 @@ if [ -n "$EXT_IPV4" ] && [ -n "$GIF_IF" ] && [ -n "$INT_IF" ] && [ -n "$GIF_UPDA
     # Set the default IPv6 route.
     route -n delete -inet6 default || true
     route -n add -inet6 default "$GIF_IPV6_SERVER"
+
+    log "Updated external IP: '$EXT_IPV4_UPDATE'"
 else
     if [ -n "$INT_IF" ]; then
         ifconfig "$INT_IF" inet6 "$GIF_IPV6_LOCAL" prefixlen 64 delete || true
     fi
     route -n delete -inet6 default || true
+
+    if [ -n "$EXT_IPV4_UPDATE" ]; then
+        log_err "Error: Failed to update external IP: '$EXT_IPV4_UPDATE'"
+    fi
 fi
 
 # Send the Discord notification.

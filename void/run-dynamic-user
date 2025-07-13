@@ -11,9 +11,6 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# Ensure C locale for consistent tr behavior
-export LC_ALL=C
-
 usage() {
     echo "Usage: $0 [--create-home] -- <command> [args...]" >&2
     exit 1
@@ -67,7 +64,7 @@ else
 fi
 
 # Generate random suffix
-dynrand=$(tr -dc 'a-z0-9' </dev/urandom | head -c 10)
+dynrand=$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 10)
 USER="svc_${SERVICE}_${dynrand}"
 GROUP="$USER"
 
