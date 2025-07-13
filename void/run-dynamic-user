@@ -1,0 +1,111 @@
+#!/bin/sh
+# run-dynamic-user: wrapper to launch a runit service with a secure, unprivileged dynamic user
+# Usage (in service run script): run-dynamic-user [--create-home] -- <command> [args...]
+
+# Exit on unset variables and errors
+set -eu
+
+# Ensure script runs as root
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Error: This script must be run as root." >&2
+    exit 1
+fi
+
+# Ensure C locale for consistent tr behavior
+export LC_ALL=C
+
+usage() {
+    echo "Usage: $0 [--create-home] -- <command> [args...]" >&2
+    exit 1
+}
+
+# Parse --create-home option
+enable_home=false
+if [ "$1" = "--create-home" ]; then
+    enable_home=true
+    shift
+fi
+
+# Expect '--' separator next
+action="${1:-}"
+shift || true
+if [ "$action" != "--" ]; then
+    echo "Missing '--' after options." >&2
+    usage
+fi
+
+# THE SERVICE NAME is derived from the working directory (runit sets PWD to svc dir)
+SERVICE="$(basename "$PWD")"
+
+# Validate SERVICE
+case "$SERVICE" in
+[A-Za-z0-9_-]*) ;;
+*)
+    echo "Invalid service name: $SERVICE" >&2
+    exit 1
+    ;;
+esac
+
+# Define runtime directory for this service
+SRV_RUN="/run/${SERVICE}"
+
+# Abort if SRV_RUN already exists
+if [ -e "$SRV_RUN" ]; then
+    echo "Runtime directory $SRV_RUN already exists; aborting to avoid conflicts." >&2
+    exit 1
+fi
+
+# Create and secure SRV_RUN
+dmkdir -p "$SRV_RUN"
+chmod 700 "$SRV_RUN"
+
+# Determine dynamic home path or /nonexistent
+if [ "$enable_home" = true ]; then
+    DYN_HOME="$SRV_RUN/home"
+else
+    DYN_HOME="/nonexistent"
+fi
+
+# Generate random suffix
+dynrand=$(tr -dc 'a-z0-9' </dev/urandom | head -c 10)
+USER="svc_${SERVICE}_${dynrand}"
+GROUP="$USER"
+
+# Allocate unused UID and GID
+UID=""
+GID=""
+for id in $(seq 60000 64000); do
+    if ! getent passwd "$id" >/dev/null 2>&1 && ! getent group "$id" >/dev/null 2>&1; then
+        UID="$id"
+        GID="$id"
+        break
+    fi
+done
+
+if [ -z "$UID" ] || [ -z "$GID" ]; then
+    echo "No free UID/GID available." >&2
+    exit 1
+fi
+
+# Create group and dynamic system user
+groupadd -g "$GID" "$GROUP"
+useradd -u "$UID" -g "$GROUP" -d "$DYN_HOME" -M -N -r -s /usr/sbin/nologin "$USER"
+
+# If requested, create and secure home directory
+if [ "$enable_home" = true ]; then
+    mkdir -p "$DYN_HOME"
+    chown "$USER:$GROUP" "$DYN_HOME"
+    chmod 700 "$DYN_HOME"
+fi
+
+# Persist identity for finish script
+echo "$USER:$UID:$GROUP:$GID" >"$SRV_RUN/identity"
+chmod 600 "$SRV_RUN/identity"
+
+# Prepare work directory inside SRV_RUN
+WORKDIR="$SRV_RUN/work"
+mkdir -p "$WORKDIR"
+chown "$USER:$GROUP" "$WORKDIR"
+
+# Finally, execute the daemon under the dynamic user
+exec chpst -u "$USER:$GROUP" -- "$@"

@@ -1,0 +1,39 @@
+#!/bin/sh
+# cleanup dynamic user and service runtime directory
+set -eu
+
+# Ensure script runs as root
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Error: This script must be run as root." >&2
+    exit 1
+fi
+
+# SERVICE is basename of working directory
+SERVICE="$(basename "$PWD")"
+# Validate SERVICE
+case "$SERVICE" in
+[A-Za-z0-9_-]*) ;;
+*)
+    echo "Invalid service name: $SERVICE" >&2
+    exit 1
+    ;;
+esac
+
+SRV_RUN="/run/${SERVICE}"
+IDFILE="$SRV_RUN/identity"
+
+# If identity file missing, nothing to clean
+[ -f "$IDFILE" ] || exit 0
+
+# Read identity (ignore extra fields)
+IFS=':' read -r USER UID GROUP _ <"$IDFILE"
+
+# Terminate any remaining processes of this user
+pkill -u "$UID" || true
+
+# Remove dynamic user and group
+userdel "$USER" || true
+groupdel "$GROUP" || true
+
+# Clean up service runtime dir
+rm -rf "$SRV_RUN"
