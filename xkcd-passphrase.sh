@@ -6,35 +6,35 @@ WORDLIST="/usr/share/dict/words"
 COUNT=5
 
 usage() {
-  printf "Usage: %s [-n word_count] [-w wordlist_file]\n" "$0" >&2
-  exit 1
+    printf "Usage: %s [-n word_count] [-w wordlist_file]\n" "$0" >&2
+    exit 1
 }
 
 # Parse options
 while getopts "n:w:" opt; do
-  case "$opt" in
-  n)
-    case "$OPTARG" in
-    '' | *[!0-9]*)
-      echo "Error: -n requires a numeric argument" >&2
-      usage
-      ;;
-    *) COUNT="$OPTARG" ;;
+    case "$opt" in
+    n)
+        case "$OPTARG" in
+        '' | *[!0-9]*)
+            echo "Error: -n requires a numeric argument" >&2
+            usage
+            ;;
+        *) COUNT="$OPTARG" ;;
+        esac
+        ;;
+    w)
+        WORDLIST="$OPTARG"
+        ;;
+    *)
+        usage
+        ;;
     esac
-    ;;
-  w)
-    WORDLIST="$OPTARG"
-    ;;
-  *)
-    usage
-    ;;
-  esac
 done
 
 # Validate wordlist
 if [ ! -r "$WORDLIST" ]; then
-  printf "Error: wordlist '%s' is not readable or does not exist\n" "$WORDLIST" >&2
-  usage
+    printf "Error: wordlist '%s' is not readable or does not exist\n" "$WORDLIST" >&2
+    usage
 fi
 
 # Prepare temporary filtered wordlist
@@ -44,32 +44,32 @@ trap 'rm -f "$TMP_LIST"' EXIT
 grep -E '^[a-z]+$' "$WORDLIST" >"$TMP_LIST"
 TOTAL=$(wc -l <"$TMP_LIST")
 if [ "$TOTAL" -eq 0 ]; then
-  printf "Error: no valid words found in '%s'\n" "$WORDLIST" >&2
-  exit 1
+    printf "Error: no valid words found in '%s'\n" "$WORDLIST" >&2
+    exit 1
 fi
 
 # Generate passphrase
 i=0
 PASSPHRASE=""
 while [ "$i" -lt "$COUNT" ]; do
-  # Get a random 16-bit number
-  RAND=$(od -An -N2 -tu2 /dev/urandom | tr -d ' ')
-  INDEX=$((RAND % TOTAL + 1))
-  raw=$(sed -n "${INDEX}p" "$TMP_LIST")
+    # Get a random 16-bit number
+    RAND=$(od -An -N2 -tu2 /dev/urandom | tr -d ' ')
+    INDEX=$((RAND % TOTAL + 1))
+    raw=$(sed -n "${INDEX}p" "$TMP_LIST")
 
-  # Capitalize first letter
-  first=${raw%"${raw#?}"}
-  rest=${raw#?}
-  cap="$(printf '%s%s' "$(printf '%s' "$first" | tr '[:lower:]' '[:upper:]')" "$rest")"
+    # Capitalize first letter
+    first=${raw%"${raw#?}"}
+    rest=${raw#?}
+    cap="$(printf '%s%s' "$(printf '%s' "$first" | tr '[:lower:]' '[:upper:]')" "$rest")"
 
-  # Build hyphen-separated passphrase
-  if [ "$i" -eq 0 ]; then
-    PASSPHRASE=$cap
-  else
-    PASSPHRASE="$PASSPHRASE-$cap"
-  fi
+    # Build hyphen-separated passphrase
+    if [ "$i" -eq 0 ]; then
+        PASSPHRASE=$cap
+    else
+        PASSPHRASE="$PASSPHRASE-$cap"
+    fi
 
-  i=$((i + 1))
+    i=$((i + 1))
 done
 
 # Output the generated passphrase

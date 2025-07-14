@@ -1,5 +1,4 @@
 #!/bin/sh
-
 awk 'BEGIN{RS="</title>"; IGNORECASE=1}
   /<title/ {
     sub(/^.*<title[^>]*>/, "", $0)

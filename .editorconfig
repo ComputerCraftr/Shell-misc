@@ -1,0 +1,55 @@
+# .editorconfig — consistent formatting for scripts, configs, Dockerfiles, systemd units, etc.
+# top-most EditorConfig file
+root = true
+
+# -------------------------------------------------------------------
+# 1. Default settings for all files
+# -------------------------------------------------------------------
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Use spaces by default, 4 spaces per indent
+indent_style = space
+indent_size = 4
+
+# -------------------------------------------------------------------
+# 2. Overrides for shell scripts and sourced config files
+# -------------------------------------------------------------------
+[*.sh]
+# inherits defaults: LF, UTF-8, 4-space indents, final newline, trim trailing spaces
+
+[*.conf]
+# for any .conf (including those sourced by shell)
+# inherits defaults
+
+[*.env]
+# environment-style files
+# inherits defaults
+
+# -------------------------------------------------------------------
+# 3. Overrides for Dockerfiles
+# -------------------------------------------------------------------
+[Dockerfile*]
+# Dockerfiles don’t require tabs; use spaces for multi-line instructions
+indent_style = space
+indent_size = 4
+
+# -------------------------------------------------------------------
+# 4. Overrides for systemd service unit files
+# -------------------------------------------------------------------
+[*.service]
+# systemd accepts LF and spaces; 4-space indent for readability
+indent_style = space
+indent_size = 4
+
+# -------------------------------------------------------------------
+# 5. Exceptions: Makefiles (require tabs)
+# -------------------------------------------------------------------
+[Makefile]
+indent_style = tab
+
+[Makefile.*]
+indent_style = tab

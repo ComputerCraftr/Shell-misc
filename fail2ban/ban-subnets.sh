@@ -1,5 +1,4 @@
 #!/bin/sh
-
 sudo ipfw table fail2ban list | awk -F '[ ./]' '{
     # Extract first three octets for subnet
     subnet = sprintf("%s.%s.%s.0", $1, $2, $3)
@@ -26,7 +25,7 @@ END {
     # Iterate over each IP in ip_list
     for ip in $ip_list; do
         # Ensure we're only unbanning individual IPs (not the subnet itself)
-        if [ "$ip" != "${subnet%/24}" ]; then  
+        if [ "$ip" != "${subnet%/24}" ]; then
             echo "Unbanning individual IP: $ip (Already covered by $subnet)"
             sudo fail2ban-client set manualbans unbanip "$ip"
         fi
