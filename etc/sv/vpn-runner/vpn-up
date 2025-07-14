@@ -117,7 +117,7 @@ else
     DISCORD_MESSAGE="${DISCORD_MESSAGE}Acquired external IP:\`\`\`$EXT_IPV4\`\`\`"
 fi
 
-GOOD_IPV4_REGEX=$(echo "^good $EXT_IPV4$" | sed 's/\./\\./g')
+GOOD_IPV4_REGEX=$(echo "^(good|nochg) $EXT_IPV4$" | sed 's/\./\\./g')
 EXT_IPV4_UPDATE=""
 
 # Bring up IPv6 gateway tunnel if available.
