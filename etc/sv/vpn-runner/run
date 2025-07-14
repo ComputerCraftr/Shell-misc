@@ -51,7 +51,7 @@ while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
 done
 
 if [ -z "$DEFAULT_GW_IPV4" ]; then
-    log_err "Error: Failed to acquire a default gateway on interface $EXT_IF after $GATEWAY_TIMEOUT seconds."
+    log_err "Error: Failed to discover a default gateway after $GATEWAY_TIMEOUT seconds."
     false
 fi
 

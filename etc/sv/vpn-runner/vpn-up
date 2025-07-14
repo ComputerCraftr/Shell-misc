@@ -22,43 +22,19 @@ log "Configured resolv.conf for VPN."
 # Configuration: timeouts, intervals, and retry settings.
 TUN_IF=$(awk '/dev / {print $2}' <"$OVPN_TEMPLATE")
 IP_TIMEOUT=30      # Total seconds to wait for an IP address.
-GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
+GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
 
 # Restart ipfw if we need to detect and apply rules on a new interface.
-if ! ipfw list | grep -qwF "$EXT_IF" || ! ipfw list | grep -qwF "$TUN_IF"; then
+if ! ipfw list | grep -qwF "$TUN_IF"; then
     service ipfw restart
 fi
 
 # Set defaults for the Discord notification if not defined.
 : "${DISCORD_MENTION:=@everyone}"
 
-# Poll for an IPv4 or non-link-local IPv6 address on the interface.
-SECONDS_WAITED=0
-IPV4=""
-IPV6=""
-
-while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
-    if ifconfig "$EXT_IF" >/dev/null 2>&1; then
-        IPV4=$(ifconfig "$EXT_IF" | awk '/inet / {print $2}')
-        IPV6=$(ifconfig "$EXT_IF" | awk '/inet6 / && $2 !~ /^fe80/ {print $2}')
-        if [ -n "$IPV4" ] || [ -n "$IPV6" ]; then
-            break
-        fi
-    fi
-    sleep "$INTERVAL"
-    SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
-done
-
-if [ -z "$IPV4" ] && [ -z "$IPV6" ]; then
-    log_err "Error: Failed to acquire an IP address on interface $EXT_IF after $IP_TIMEOUT seconds."
-    false
-fi
-
-# Build the IP information string.
-DISCORD_MESSAGE="\`$(date)\` - \`${EXT_IF}\` acquired IP address(es):"
-[ -n "$IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV4\`\`\`"
-[ -n "$IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$IPV6\`\`\`"
+# Build the message string.
+DISCORD_MESSAGE="\`$(date)\` - "
 
 # Poll for default gateways for IPv4 and IPv6 (using netstat).
 SECONDS_WAITED=0
@@ -78,13 +54,13 @@ while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
 done
 
 if [ -z "$DEFAULT_GW_IPV4" ]; then
-    log_err "Error: Failed to acquire a default gateway on interface $EXT_IF after $GATEWAY_TIMEOUT seconds."
+    log_err "Error: Failed to discover a default gateway after $GATEWAY_TIMEOUT seconds."
     false
 fi
 
 # Build the default gateway information string.
 if [ -n "$DEFAULT_GW_IPV4" ] || [ -n "$DEFAULT_GW_IPV6" ]; then
-    DISCORD_MESSAGE="${DISCORD_MESSAGE}Default Gateway(s):"
+    DISCORD_MESSAGE="${DISCORD_MESSAGE}Discovered default gateway(s):"
     [ -n "$DEFAULT_GW_IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV4\`\`\`"
     [ -n "$DEFAULT_GW_IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV6\`\`\`"
 fi
@@ -138,7 +114,7 @@ if [ -z "$EXT_IPV4" ] ||
     log_err "Error: External IP is not usable: '$EXT_IPV4'"
     EXT_IPV4=""
 else
-    DISCORD_MESSAGE="${DISCORD_MESSAGE}External IP:\`\`\`$EXT_IPV4\`\`\`"
+    DISCORD_MESSAGE="${DISCORD_MESSAGE}Acquired external IP:\`\`\`$EXT_IPV4\`\`\`"
 fi
 
 GOOD_IPV4_REGEX=$(echo "^good $EXT_IPV4$" | sed 's/\./\\./g')
@@ -175,6 +151,7 @@ else
     if [ -n "$EXT_IPV4_UPDATE" ]; then
         log_err "Error: Failed to update external IP: '$EXT_IPV4_UPDATE'"
     fi
+    DISCORD_MESSAGE="${DISCORD_MESSAGE}External IP is not usable."
 fi
 
 # Send the Discord notification.
