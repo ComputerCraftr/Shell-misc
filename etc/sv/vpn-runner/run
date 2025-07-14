@@ -25,7 +25,8 @@ GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
 
 # Verify the specified interface exists. Sometimes it isn't available immediately.
-if [ -n "${EXT_IF:-}" ] && ifconfig "$EXT_IF" >/dev/null 2>&1; then
+EXT_IF_AVAILABLE=$([ -n "${EXT_IF:-}" ] && ifconfig "$EXT_IF" >/dev/null 2>&1 && echo 1 || echo 0)
+if [ "$EXT_IF_AVAILABLE" -eq 1 ]; then
     # Bring the interface up.
     ifconfig "$EXT_IF" up
 
@@ -53,7 +54,7 @@ if [ -z "$DEFAULT_GW_IPV4" ]; then
 fi
 
 # Update the OpenVPN configuration.
-if [ -f "${OVPN_PROXY_AUTH:-}" ]; then
+if [ "$EXT_IF_AVAILABLE" -eq 1 ] && [ -f "${OVPN_PROXY_AUTH:-}" ]; then
     sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
         -e "s|__PROXY_STRING__|${DEFAULT_GW_IPV4} ${OVPN_PROXY_PORT}|" \
         -e "s|__PROXY_AUTH_FILE__|$OVPN_PROXY_AUTH|" \
