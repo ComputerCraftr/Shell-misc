@@ -21,20 +21,17 @@ fi
 
 # Configuration: timeouts, intervals, and retry settings.
 OVPN_PROXY_PORT=$(tail -n 1 "${OVPN_PROXY_AUTH:-}" 2>/dev/null || echo 0)
-GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
+GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
 
 # Verify the specified interface exists. Sometimes it isn't available immediately.
-if ! ifconfig "$EXT_IF" >/dev/null 2>&1; then
-    log_err "Error: Interface $EXT_IF does not exist."
-    false
+if [ -n "${EXT_IF:-}" ] && ifconfig "$EXT_IF" >/dev/null 2>&1; then
+    # Bring the interface up.
+    ifconfig "$EXT_IF" up
+
+    # Restart the DHCP client service on the interface.
+    service dhclient restart "$EXT_IF"
 fi
-
-# Bring the interface up.
-ifconfig "$EXT_IF" up
-
-# Restart the DHCP client service on the interface.
-service dhclient restart "$EXT_IF"
 
 # Poll for default gateways for IPv4 (using netstat).
 SECONDS_WAITED=0
