@@ -1,2 +1,2 @@
 #!/data/data/com.termux/files/usr/bin/sh
-exec ~/3proxy/bin/3proxy ~/.3proxy.cfg
+exec nice -n -20 ~/3proxy/bin/3proxy ~/.3proxy.cfg

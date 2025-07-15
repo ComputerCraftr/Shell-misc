@@ -1,2 +1,2 @@
 #!/data/data/com.termux/files/usr/bin/sh
-exec iperf3 -s
+exec nice -n -20 iperf3 -s
