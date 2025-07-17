@@ -25,6 +25,21 @@ IP_TIMEOUT=30      # Total seconds to wait for an IP address.
 GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
 
+# Ensure single instance using a simple PID-based lockfile.
+LOCKFILE="/var/run/${SCRIPT_NAME}.${TUN_IF}.lock"
+if [ -e "$LOCKFILE" ]; then
+    OLDPID=$(cat "$LOCKFILE" 2>/dev/null || echo "")
+    if [ -n "$OLDPID" ] && kill -0 "$OLDPID" 2>/dev/null; then
+        log_err "Lockfile exists and process $OLDPID is still running. Exiting."
+        exit 0
+    fi
+    log "Stale lockfile found. Removing..."
+    rm -f "$LOCKFILE"
+fi
+
+trap 'rm -f "$LOCKFILE"' INT TERM HUP EXIT
+echo $$ >"$LOCKFILE"
+
 # Restart ipfw if we need to detect and apply rules on a new interface.
 if ! ipfw list | grep -qwF "$TUN_IF"; then
     service ipfw restart
