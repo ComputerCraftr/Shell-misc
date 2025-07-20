@@ -1,5 +1,4 @@
 #!/bin/sh
-
 set -eu
 
 sudo xbps-install -Syu ufw nftables iptables-nft cryptsetup google-authenticator-libpam libqrencode spectre-meltdown-checker lynis linux-firmware socklog-void cronie chrony
@@ -15,10 +14,14 @@ sudo sh -c 'echo integrity > /sys/kernel/security/lockdown'
 
 mkdir -p ~/.ssh
 chmod 700 ~/.ssh
-ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''
-tee -a ~/.ssh/authorized_keys <~/.ssh/id_ed25519.pub
+if [ ! -f ~/.ssh/id_ed25519.pub ]; then
+    ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''
+    tee -a ~/.ssh/authorized_keys <~/.ssh/id_ed25519.pub
+fi
 
-google-authenticator -t -d -r 3 -R 30 -W
+if [ ! -f ~/.google_authenticator ]; then
+    google-authenticator -t -d -r 3 -R 30 -W
+fi
 
 #ga_pam_line="auth requisite pam_google_authenticator.so"
 #pw_pam_line="auth requisite pam_unix.so"
