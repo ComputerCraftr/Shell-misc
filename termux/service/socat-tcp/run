@@ -1,0 +1,24 @@
+#!/data/data/com.termux/files/usr/bin/sh
+set -eu
+
+TARGET="$(head -n 1 ./env/TARGET)"
+PORT="${BIND_PORT:-21080}"
+
+# Optional: configure bind IP and validate it's not empty or blank
+SOCAT_OPTS="fork,reuseaddr"
+if [ -f ./env/BIND_IP ]; then
+    BIND_IP="$(head -n 1 ./env/BIND_IP | tr -d '[:space:]')"
+    if [ -n "$BIND_IP" ]; then
+        SOCAT_OPTS="${SOCAT_OPTS},bind=${BIND_IP}"
+    fi
+fi
+
+# Allow override of bind port via env/BIND_PORT if set
+if [ -f ./env/BIND_PORT ]; then
+    PORT_OVERRIDE="$(head -n 1 ./env/BIND_PORT | tr -d '[:space:]')"
+    if [ -n "$PORT_OVERRIDE" ]; then
+        PORT="$PORT_OVERRIDE"
+    fi
+fi
+
+exec nice -n -20 socat TCP-LISTEN:"$PORT","$SOCAT_OPTS" TCP:"$TARGET"
