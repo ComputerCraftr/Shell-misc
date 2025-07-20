@@ -23,8 +23,8 @@ if [ "$current_user" != "pinger" ]; then
 fi
 
 # Load configuration
-: "${RING_BUFFER_DAYS:=$(cat /etc/sv/pinger/env/RING_BUFFER_DAYS 2>/dev/null || echo 7)}"
-: "${TARGET:=$(cat /etc/sv/pinger/env/TARGET 2>/dev/null || echo 2001:470:20::2)}"
+: "${RING_BUFFER_DAYS:=$(cat ./env/RING_BUFFER_DAYS 2>/dev/null || echo 7)}"
+: "${TARGET:=$(cat ./env/TARGET 2>/dev/null || echo 2001:470:20::2)}"
 RING_BUFFER_SIZE=$((RING_BUFFER_DAYS * 86400))
 DB="/var/db/pinger/pings.db"
 
