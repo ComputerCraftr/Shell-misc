@@ -19,19 +19,44 @@ fi
 # Load environment variables from /usr/local/etc/.gateway-env.conf config file.
 . /usr/local/etc/.gateway-env.conf
 
+# Get current default gateway interface.
+EXT_IF_CUR=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $4}')
+EXT_IF_NEW=""
+
+# Build a newline-separated list of candidates, filtering out the current default.
+CANDIDATE_LINES=$(printf '%s\n' "$EXT_IF_LIST" | tr ',' '\n' | grep -Fvx "$EXT_IF_CUR")
+
+# Count how many we have.
+NUM_CANDIDATES=$(printf '%s\n' "$CANDIDATE_LINES" | wc -l)
+if [ "$NUM_CANDIDATES" -gt 0 ]; then
+    # Pick a random index (1…NUM_CANDIDATES).
+    RAND=$(od -An -N2 -tu2 /dev/urandom | tr -d ' ')
+    INDEX=$((RAND % NUM_CANDIDATES + 1))
+
+    # Grab exactly that line.
+    EXT_IF_NEW=$(printf '%s\n' "$CANDIDATE_LINES" | sed -n "${INDEX}p")
+else
+    # Fall back to the current interface.
+    EXT_IF_NEW="${EXT_IF_CUR:-}"
+fi
+
 # Configuration: timeouts, intervals, and retry settings.
 OVPN_PROXY_PORT=$(tail -n 1 "${OVPN_PROXY_AUTH:-}" 2>/dev/null || echo 0)
 GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
 
 # Verify the specified interface exists. Sometimes it isn't available immediately.
-EXT_IF_AVAILABLE=$([ -n "${EXT_IF:-}" ] && ifconfig "$EXT_IF" >/dev/null 2>&1 && echo 1 || echo 0)
+EXT_IF_AVAILABLE=$([ -n "${EXT_IF_NEW:-}" ] && ifconfig "$EXT_IF_NEW" >/dev/null 2>&1 && echo 1 || echo 0)
 if [ "$EXT_IF_AVAILABLE" -eq 1 ]; then
+    # Delete existing default routes for IPv4 and IPv6.
+    route -n delete -inet default || true
+    route -n delete -inet6 default || true
+
     # Bring the interface up.
-    ifconfig "$EXT_IF" up
+    ifconfig "$EXT_IF_NEW" up
 
     # Restart the DHCP client service on the interface.
-    service dhclient restart "$EXT_IF"
+    service dhclient restart "$EXT_IF_NEW"
 fi
 
 # Poll for default gateways for IPv4 (using netstat).
@@ -54,7 +79,8 @@ if [ -z "$DEFAULT_GW_IPV4" ]; then
 fi
 
 # Update the OpenVPN configuration.
-if [ "$EXT_IF_AVAILABLE" -eq 1 ] && [ -f "${OVPN_PROXY_AUTH:-}" ]; then
+if [ "$EXT_IF_AVAILABLE" -eq 1 ] && [ -f "${OVPN_PROXY_AUTH:-}" ] &&
+    [ "$OVPN_PROXY_PORT" -gt 0 ] && echo "$EXT_IF_NEW" | grep -q 'ue[0-9]'; then
     sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
         -e "s|__PROXY_STRING__|${DEFAULT_GW_IPV4} ${OVPN_PROXY_PORT}|" \
         -e "s|__PROXY_AUTH_FILE__|$OVPN_PROXY_AUTH|" \

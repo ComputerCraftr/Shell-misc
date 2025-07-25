@@ -41,7 +41,8 @@ trap 'rm -f "$LOCKFILE"' INT TERM HUP EXIT
 echo $$ >"$LOCKFILE"
 
 # Restart ipfw if we need to detect and apply rules on a new interface.
-if ! ipfw list | grep -qwF "$TUN_IF"; then
+if { [ -n "$GIF_IF" ] && ! ipfw list | grep -qwF "$GIF_IF"; } ||
+    ! ipfw list | grep -qwF "$TUN_IF"; then
     service ipfw restart
 fi
 
@@ -153,7 +154,6 @@ if echo "$EXT_IPV4_UPDATE" | grep -qE "$GOOD_IPV4_REGEX"; then
     ifconfig "$INT_IF" inet6 "$GIF_IPV6_LOCAL" prefixlen 64 up
 
     # Set the default IPv6 route.
-    route -n delete -inet6 default || true
     route -n add -inet6 default "$GIF_IPV6_SERVER"
 
     log "Updated external IP: '$EXT_IPV4_UPDATE'"
@@ -161,7 +161,6 @@ else
     if [ -n "$INT_IF" ]; then
         ifconfig "$INT_IF" inet6 "$GIF_IPV6_LOCAL" prefixlen 64 delete || true
     fi
-    route -n delete -inet6 default || true
 
     if [ -n "$EXT_IPV4_UPDATE" ]; then
         log_err "Error: Failed to update external IP: '$EXT_IPV4_UPDATE'"
