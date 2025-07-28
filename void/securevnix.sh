@@ -10,7 +10,30 @@ sudo ln -sf /etc/sv/nanoklogd /var/service
 sudo ln -sf /etc/sv/cronie /var/service
 sudo ln -sf /etc/sv/chronyd /var/service
 
+# Reset UFW to flush any existing rules and disable it
+sudo ufw --force reset
+sudo ufw enable
+sudo ufw allow in from 10.1.0.0/16 to any port 22,5201 proto tcp
+sudo ufw allow in from 10.1.0.0/16 to any port 5201 proto udp
+sudo ufw allow in from fe80::/10 to any port 22,5201 proto tcp
+sudo ufw allow in from fe80::/10 to any port 5201 proto udp
+
 sudo sh -c 'echo integrity > /sys/kernel/security/lockdown'
+if [ ! -f /etc/rc.local ]; then
+    sudo tee /etc/rc.local <<EOF
+#!/bin/sh
+set -eu
+echo integrity > /sys/kernel/security/lockdown
+EOF
+    sudo chmod +x /etc/rc.local
+fi
+
+# Ensure kernel lockdown is set on every boot
+if ! sudo grep -qF 'echo integrity > /sys/kernel/security/lockdown' /etc/rc.local; then
+    sudo tee -a /etc/rc.local <<EOF
+echo integrity > /sys/kernel/security/lockdown
+EOF
+fi
 
 mkdir -p ~/.ssh
 chmod 700 ~/.ssh
@@ -23,5 +46,42 @@ if [ ! -f ~/.google_authenticator ]; then
     google-authenticator -t -d -r 3 -R 30 -W
 fi
 
-#ga_pam_line="auth requisite pam_google_authenticator.so"
-#pw_pam_line="auth requisite pam_unix.so"
+# Configure PAM for SSHD: require Google Authenticator and Unix auth, handle different include lines
+pam_file=/etc/pam.d/sshd
+ga_line="auth requisite pam_google_authenticator.so"
+pw_line="auth requisite pam_unix.so"
+
+# Determine which include directive exists (system-auth or common-auth)
+if sudo grep -qE '^auth\s+include\s+system-auth' "$pam_file"; then
+    target='system-auth'
+elif sudo grep -qE '^auth\s+include\s+common-auth' "$pam_file"; then
+    target='common-auth'
+else
+    target=''
+fi
+
+# Insert Google Authenticator line if missing
+if ! sudo grep -qF "$ga_line" "$pam_file"; then
+    if [ -n "$target" ]; then
+        sudo sed -i "/^auth include $target/i $ga_line" "$pam_file"
+    else
+        sudo sed -i "1i $ga_line" "$pam_file"
+    fi
+fi
+
+# Insert Unix auth line if missing, placing it immediately after the GA line or at top
+if ! sudo grep -qF "$pw_line" "$pam_file"; then
+    if sudo grep -qF "$ga_line" "$pam_file"; then
+        sudo sed -i "/$ga_line/a $pw_line" "$pam_file"
+    else
+        sudo sed -i "1i $pw_line" "$pam_file"
+    fi
+fi
+
+# Enforce PAM and 2FA in sshd_config
+sudo sed -i \
+    -e 's/^#\?UsePAM .*/UsePAM yes/' \
+    -e 's/^#\?KbdInteractiveAuthentication .*/KbdInteractiveAuthentication yes/' \
+    -e 's/^#\?AuthenticationMethods .*/AuthenticationMethods publickey,password publickey,keyboard-interactive/' \
+    -e 's/^#\?UseDNS .*/UseDNS no/' \
+    /etc/ssh/sshd_config
