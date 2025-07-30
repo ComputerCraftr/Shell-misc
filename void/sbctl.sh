@@ -3,7 +3,7 @@ set -eu
 
 # CONFIGURATION
 KEY_DEV="/dev/mapper/luks_keystore"
-LUKS_DEV="/dev/nvme0n1p2" # Adjust if different
+LUKS_DEV="/dev/nvme1n1p2" # Adjust if different
 MNT_BASE="/mnt/keystore"
 MNT_SBCTL="/var/lib/sbctl/keys"
 
