@@ -20,7 +20,7 @@ log "Configured resolv.conf for VPN."
 . /usr/local/etc/.gateway-env.conf
 
 # Configuration: timeouts, intervals, and retry settings.
-TUN_IF=$(awk '/dev / {print $2}' <"$OVPN_TEMPLATE")
+TUN_IF=$(awk '/dev / {print $2; exit}' <"$OVPN_TEMPLATE")
 IP_TIMEOUT=30      # Total seconds to wait for an IP address.
 GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
@@ -55,13 +55,15 @@ DISCORD_MESSAGE="\`$(date)\` - "
 # Poll for default gateways for IPv4 and IPv6 (using netstat).
 SECONDS_WAITED=0
 DEFAULT_GW_IPV4=""
+DEFAULT_IF_IPV4=""
 DEFAULT_GW_IPV6=""
 
 while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
     # For IPv4, extract the default gateway from netstat.
-    DEFAULT_GW_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $2}')
+    DEFAULT_GW_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $2; exit}')
+    DEFAULT_IF_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $4; exit}')
     # For IPv6, extract the default gateway from netstat (ignoring link-local).
-    DEFAULT_GW_IPV6=$(netstat -rn -f inet6 2>/dev/null | awk '$1 == "default" {print $2}')
+    DEFAULT_GW_IPV6=$(netstat -rn -f inet6 2>/dev/null | awk '$1 == "default" {print $2; exit}')
     if [ -n "$DEFAULT_GW_IPV4" ]; then
         break
     fi
@@ -76,7 +78,7 @@ fi
 
 # Build the default gateway information string.
 if [ -n "$DEFAULT_GW_IPV4" ] || [ -n "$DEFAULT_GW_IPV6" ]; then
-    DISCORD_MESSAGE="${DISCORD_MESSAGE}Discovered default gateway(s):"
+    DISCORD_MESSAGE="${DISCORD_MESSAGE}\`${DEFAULT_IF_IPV4}\` Discovered default gateway(s):"
     [ -n "$DEFAULT_GW_IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV4\`\`\`"
     [ -n "$DEFAULT_GW_IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV6\`\`\`"
 fi
@@ -87,7 +89,7 @@ TUN_IPV4=""
 
 while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
     if ifconfig "$TUN_IF" >/dev/null 2>&1; then
-        TUN_IPV4=$(ifconfig "$TUN_IF" | awk '/inet / {print $2}')
+        TUN_IPV4=$(ifconfig "$TUN_IF" | awk '/inet / {print $2; exit}')
         if [ -n "$TUN_IPV4" ]; then
             break
         fi
@@ -146,7 +148,7 @@ fi
 
 if echo "$EXT_IPV4_UPDATE" | grep -qE "$GOOD_IPV4_REGEX"; then
     # Calculate MTU - 20 bytes for 6in4 overhead.
-    GIF_MTU=$(($(ifconfig "$TUN_IF" | awk '/mtu / {print $NF}') - 20))
+    GIF_MTU=$(($(ifconfig "$TUN_IF" | awk '/mtu / {print $NF; exit}') - 20))
 
     # Bring up the 6in4 tunnel.
     ifconfig "$GIF_IF" tunnel "$TUN_IPV4" "$GIF_IPV4_SERVER" mtu "$GIF_MTU"
