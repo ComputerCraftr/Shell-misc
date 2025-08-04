@@ -1,5 +1,6 @@
 #!/bin/sh
 # runit service "pinger": keepalives & latency logging
+# Supports SQLite file or PostgreSQL via Unix socket
 # -------------------------------------------------------------
 # Location: /etc/sv/pinger/run
 # Service account: pinger
@@ -8,12 +9,12 @@
 #   pw useradd -n pinger -c "pinger service" -s /usr/sbin/nologin -d /nonexistent -w no
 #   mkdir -p /var/db/pinger && chown -R pinger:pinger /var/db/pinger
 #   mkdir -p /etc/sv/pinger/env && chmod -R 755 /etc/sv/pinger && \
-#     echo "RING_BUFFER_DAYS=7" > /etc/sv/pinger/env/RING_BUFFER_DAYS && \
-#     echo "TARGET=2001:470:20::2" > /etc/sv/pinger/env/TARGET
-#
+#     echo "RING_BUFFER_DAYS=7"   > /etc/sv/pinger/env/RING_BUFFER_DAYS && \
+#     echo "TARGET=2001:470:20::2" > /etc/sv/pinger/env/TARGET && \
+#     echo "DB_TYPE=sqlite"       > /etc/sv/pinger/env/DB_TYPE  # sqlite or postgres
+#   # If using PostgreSQL, also set PGHOST, PGPORT, PGDATABASE, PGUSER in env/
 # Enable service: ln -s /etc/sv/pinger /var/service/
 
-# Exit on unset variables and errors
 set -eu
 
 # Drop privileges if needed
@@ -25,49 +26,90 @@ fi
 # Load configuration
 : "${RING_BUFFER_DAYS:=$(cat ./env/RING_BUFFER_DAYS 2>/dev/null || echo 7)}"
 : "${TARGET:=$(cat ./env/TARGET 2>/dev/null || echo 2001:470:20::2)}"
+: "${DB_TYPE:=$(cat ./env/DB_TYPE 2>/dev/null || echo sqlite)}"
 RING_BUFFER_SIZE=$((RING_BUFFER_DAYS * 86400))
-DB="/var/db/pinger/pings.db"
 
 # Startup delay to ensure unique integer-second timestamps
 sleep 1
 
-# Initialize database schema (run once per connection will persist WAL mode)
-sqlite3 "$DB" <<EOF
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
+# Common SQL templates
+INIT_SCHEMA_SQL=$(
+    cat <<'EOS'
+-- SQLite or PostgreSQL schema initialization
 CREATE TABLE IF NOT EXISTS pings (
     slot       INTEGER PRIMARY KEY,
-    ts         DATETIME DEFAULT CURRENT_TIMESTAMP UNIQUE,
-    latency_ms REAL    NOT NULL
+    ts         %TSTYPE% NOT NULL DEFAULT %TSDEF% UNIQUE,
+    latency_ms REAL   NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pings_ts ON pings(ts);
-EOF
+EOS
+)
+
+UPSERT_SQL=$(
+    cat <<'EOS'
+-- SQLite or PostgreSQL upsert
+INSERT INTO pings(slot, latency_ms) VALUES(
+    %SLOT%, %RTT%
+) ON CONFLICT(slot) DO UPDATE SET
+    ts         = %TSUPD%,
+    latency_ms = EXCLUDED.latency_ms;
+EOS
+)
+
+# SQL to fetch last slot
+SELECT_LAST_SLOT="SELECT slot FROM pings ORDER BY ts DESC LIMIT 1;"
+
+# Backend initialization
+if [ "$DB_TYPE" = "sqlite" ]; then
+    DB_FILE="/var/db/pinger/pings.db"
+    # Initialize SQLite schema via sed
+    SCHEMA_SQL=$(echo "$INIT_SCHEMA_SQL" |
+        sed 's/%TSTYPE%/DATETIME/g; s/%TSDEF%/CURRENT_TIMESTAMP/g')
+    echo "$SCHEMA_SQL" | sqlite3 "$DB_FILE"
+elif [ "$DB_TYPE" = "postgres" ]; then
+    # PostgreSQL settings
+    : "${PGHOST:=/var/run/postgresql}"
+    : "${PGPORT:=5432}"
+    : "${PGDATABASE:=pinger}"
+    : "${PGUSER:=pinger}"
+    PSQL="psql -qAt -h $PGHOST -p $PGPORT -U $PGUSER -d $PGDATABASE"
+    # Initialize PostgreSQL schema via sed
+    SCHEMA_SQL=$(echo "$INIT_SCHEMA_SQL" |
+        sed 's/%TSTYPE%/TIMESTAMPTZ/g; s/%TSDEF%/now()/g')
+    echo "BEGIN; $SCHEMA_SQL COMMIT;" | $PSQL
+else
+    echo "[pinger] ERROR: unsupported DB_TYPE '$DB_TYPE'" >&2
+    exit 1
+fi
 
 # Determine starting slot
-last_slot=$(sqlite3 "$DB" 'SELECT slot FROM pings ORDER BY ts DESC LIMIT 1;')
+if [ "$DB_TYPE" = "sqlite" ]; then
+    last_slot=$(echo "$SELECT_LAST_SLOT" | sqlite3 "$DB_FILE")
+else
+    last_slot=$(echo "$SELECT_LAST_SLOT" | $PSQL)
+fi
 case "$last_slot" in
-'' | *[!0-9]*) slot=0 ;;                           # start at zero if empty or invalid
+'' | *[!0-9]*) slot=0 ;;                           # empty or invalid
 *) slot=$(((last_slot + 1) % RING_BUFFER_SIZE)) ;; # wrap
 esac
 
 # Main loop: ping, log, advance
 while :; do
-    # Ping with native timeout; parse average RTT from min/avg/max line
-    rtt=$(ping6 -c 1 -W 1 -q "$TARGET" 2>/dev/null | awk -F/ '/[Mm]in\/avg\/max/ {print $5}')
+    rtt=$(ping6 -c 1 -W 1 -q "$TARGET" 2>/dev/null |
+        awk -F/ '/[Mm]in\/avg\/max/ {print $5}')
 
     if [ -n "$rtt" ]; then
-        # Use targeted UPSERT on slot; UNIQUE(ts) catches duplicate timestamps
-        if sqlite3 "$DB" "\
-PRAGMA synchronous = NORMAL;
-INSERT INTO pings(slot, latency_ms)
-  VALUES ($slot, $rtt)
-  ON CONFLICT(slot) DO UPDATE SET
-    ts         = CURRENT_TIMESTAMP,
-    latency_ms = excluded.latency_ms;"; then
-            slot=$(((slot + 1) % RING_BUFFER_SIZE))
+        # Render upsert SQL via sed
+        if [ "$DB_TYPE" = "sqlite" ]; then
+            SQL=$(echo "$UPSERT_SQL" |
+                sed 's/%SLOT%/'"$slot"'/g; s/%RTT%/'"$rtt"'/g; s/%TSUPD%/CURRENT_TIMESTAMP/g')
+            echo "$SQL" | sqlite3 "$DB_FILE"
         else
-            echo "[pinger] ERROR: duplicate timestamp or write failure at slot $slot" >&2
+            SQL=$(echo "$UPSERT_SQL" |
+                sed 's/%SLOT%/'"$slot"'/g; s/%RTT%/'"$rtt"'/g; s/%TSUPD%/now()/g')
+            echo "$SQL" | $PSQL
         fi
+        slot=$(((slot + 1) % RING_BUFFER_SIZE))
     fi
 
     sleep 1
