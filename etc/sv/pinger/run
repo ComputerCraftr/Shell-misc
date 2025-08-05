@@ -9,9 +9,9 @@
 #   pw useradd -n pinger -c "pinger service" -s /usr/sbin/nologin -d /nonexistent -w no
 #   mkdir -p /var/db/pinger && chown -R pinger:pinger /var/db/pinger
 #   mkdir -p /etc/sv/pinger/env && chmod -R 755 /etc/sv/pinger && \
-#     echo "RING_BUFFER_DAYS=7"   > /etc/sv/pinger/env/RING_BUFFER_DAYS && \
-#     echo "TARGET=2001:470:20::2" > /etc/sv/pinger/env/TARGET && \
-#     echo "DB_TYPE=sqlite"       > /etc/sv/pinger/env/DB_TYPE  # sqlite or postgres
+#     echo "RING_BUFFER_DAYS=7"    >> /etc/sv/pinger/env/pinger.env && \
+#     echo "TARGET=2001:470:20::2" >> /etc/sv/pinger/env/pinger.env && \
+#     echo "DB_TYPE=sqlite"        >> /etc/sv/pinger/env/pinger.env  # sqlite or postgres
 #   # If using PostgreSQL, also set PGHOST, PGPORT, PGDATABASE, PGUSER in env/
 # Enable service: ln -s /etc/sv/pinger /var/service/
 
@@ -23,10 +23,19 @@ if [ "$current_user" != "pinger" ]; then
     exec chpst -u pinger /bin/sh "$0" "$@"
 fi
 
-# Load configuration
-: "${RING_BUFFER_DAYS:=$(cat ./env/RING_BUFFER_DAYS 2>/dev/null || echo 7)}"
-: "${TARGET:=$(cat ./env/TARGET 2>/dev/null || echo 2001:470:20::2)}"
-: "${DB_TYPE:=$(cat ./env/DB_TYPE 2>/dev/null || echo sqlite)}"
+# Load environment
+ENV_DIR="$(dirname "$0")/env"
+[ -f "$ENV_DIR/pinger.env" ] && . "$ENV_DIR/pinger.env"
+
+# Defaults
+: "${RING_BUFFER_DAYS:=7}"
+: "${TARGET:=2001:470:20::2}"
+: "${DB_TYPE:=sqlite}"
+: "${DB_FILE:=/var/db/pinger/pings.db}"
+: "${PGHOST:=/var/run/postgresql}"
+: "${PGPORT:=5432}"
+: "${PGDATABASE:=pinger}"
+: "${PGUSER:=pinger}"
 RING_BUFFER_SIZE=$((RING_BUFFER_DAYS * 86400))
 
 # Startup delay to ensure unique integer-second timestamps
@@ -59,37 +68,31 @@ EOS
 # SQL to fetch last slot
 SELECT_LAST_SLOT="SELECT slot FROM pings ORDER BY ts DESC LIMIT 1;"
 
-# Backend initialization
-if [ "$DB_TYPE" = "sqlite" ]; then
-    DB_FILE="/var/db/pinger/pings.db"
-    # Initialize SQLite schema via sed
-    SCHEMA_SQL=$(echo "$INIT_SCHEMA_SQL" |
-        sed 's/%TSTYPE%/DATETIME/g; s/%TSDEF%/CURRENT_TIMESTAMP/g')
-    echo "$SCHEMA_SQL" | sqlite3 "$DB_FILE"
-elif [ "$DB_TYPE" = "postgres" ]; then
-    # PostgreSQL settings
-    : "${PGHOST:=/var/run/postgresql}"
-    : "${PGPORT:=5432}"
-    : "${PGDATABASE:=pinger}"
-    : "${PGUSER:=pinger}"
-    PSQL="psql -qAt -h $PGHOST -p $PGPORT -U $PGUSER -d $PGDATABASE"
-    # Initialize PostgreSQL schema via sed
-    SCHEMA_SQL=$(echo "$INIT_SCHEMA_SQL" |
-        sed 's/%TSTYPE%/TIMESTAMPTZ/g; s/%TSDEF%/now()/g')
-    echo "BEGIN; $SCHEMA_SQL COMMIT;" | $PSQL
-else
-    echo "[pinger] ERROR: unsupported DB_TYPE '$DB_TYPE'" >&2
+# Determine client command and schema substitutions
+case "$DB_TYPE" in
+sqlite)
+    SED_SCHEMA='s/%TSTYPE%/DATETIME/g; s/%TSDEF%/CURRENT_TIMESTAMP/g'
+    CLIENT_CMD="sqlite3 '$DB_FILE'"
+    TS_UPDATE='CURRENT_TIMESTAMP'
+    ;;
+postgres)
+    SED_SCHEMA='s/%TSTYPE%/TIMESTAMPTZ/g; s/%TSDEF%/now()/g'
+    CLIENT_CMD="psql -qAt -h '$PGHOST' -p '$PGPORT' -U '$PGUSER' -d '$PGDATABASE'"
+    TS_UPDATE='now()'
+    ;;
+*)
+    echo "[pinger] ERROR: unsupported DB_TYPE='$DB_TYPE'" >&2
     exit 1
-fi
+    ;;
+esac
+
+# Initialize schema
+echo "$INIT_SCHEMA_SQL" | sed "$SED_SCHEMA" | eval "$CLIENT_CMD"
 
 # Determine starting slot
-if [ "$DB_TYPE" = "sqlite" ]; then
-    last_slot=$(echo "$SELECT_LAST_SLOT" | sqlite3 "$DB_FILE")
-else
-    last_slot=$(echo "$SELECT_LAST_SLOT" | $PSQL)
-fi
+last_slot=$(echo "$SELECT_LAST_SLOT" | eval "$CLIENT_CMD")
 case "$last_slot" in
-'' | *[!0-9]*) slot=0 ;;                           # empty or invalid
+'' | *[!0-9]*) slot=0 ;;                           # invalid
 *) slot=$(((last_slot + 1) % RING_BUFFER_SIZE)) ;; # wrap
 esac
 
@@ -100,15 +103,9 @@ while :; do
 
     if [ -n "$rtt" ]; then
         # Render upsert SQL via sed
-        if [ "$DB_TYPE" = "sqlite" ]; then
-            SQL=$(echo "$UPSERT_SQL" |
-                sed 's/%SLOT%/'"$slot"'/g; s/%RTT%/'"$rtt"'/g; s/%TSUPD%/CURRENT_TIMESTAMP/g')
-            echo "$SQL" | sqlite3 "$DB_FILE"
-        else
-            SQL=$(echo "$UPSERT_SQL" |
-                sed 's/%SLOT%/'"$slot"'/g; s/%RTT%/'"$rtt"'/g; s/%TSUPD%/now()/g')
-            echo "$SQL" | $PSQL
-        fi
+        SQL=$(echo "$UPSERT_SQL" |
+            sed "s/%SLOT%/$slot/; s/%RTT%/$rtt/; s/%TSUPD%/$TS_UPDATE/")
+        echo "$SQL" | eval "$CLIENT_CMD"
         slot=$(((slot + 1) % RING_BUFFER_SIZE))
     fi
 
