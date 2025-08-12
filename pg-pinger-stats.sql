@@ -1,3 +1,15 @@
+-- pinger latency summary (PostgreSQL)
+--
+-- Usage (with psql):
+--   psql -d pinger_db -v ON_ERROR_STOP=1 -X \
+--        --pset=border=2 --pset=null='—' \
+--        -f pg-pinger-stats.sql
+--
+-- Notes:
+--   * Assumes database "pinger_db", schema "pinger", table "pings" with columns:
+--       ts (timestamp[tz]) and latency_ms (real/double precision/numeric).
+--   * This script sets search_path to the "pinger" schema; adjust if needed.
+--   * For nicer formatting in psql you can also run interactively and issue: \pset border 2, \pset null '—'.
 SET search_path TO pinger;
 WITH recent_1d AS (
     SELECT ts,
