@@ -18,12 +18,17 @@ sudo ufw allow in from 10.1.0.0/16 to any port 5201 proto udp
 sudo ufw allow in from fe80::/10 to any port 22,5201 proto tcp
 sudo ufw allow in from fe80::/10 to any port 5201 proto udp
 
-sudo sh -c 'echo integrity > /sys/kernel/security/lockdown'
+# Set kernel lockdown if it is not currently active
+if [ -r /sys/kernel/security/lockdown ] && grep -qF '[none]' /sys/kernel/security/lockdown 2>/dev/null; then
+    sudo sh -c 'echo integrity > /sys/kernel/security/lockdown 2>/dev/null || :'
+fi
 if [ ! -f /etc/rc.local ]; then
     sudo tee /etc/rc.local <<EOF
 #!/bin/sh
 set -eu
-echo integrity > /sys/kernel/security/lockdown
+if [ -r /sys/kernel/security/lockdown ] && grep -qF '[none]' /sys/kernel/security/lockdown 2>/dev/null; then
+    echo integrity > /sys/kernel/security/lockdown 2>/dev/null || :
+fi
 EOF
     sudo chmod +x /etc/rc.local
 fi
@@ -31,7 +36,9 @@ fi
 # Ensure kernel lockdown is set on every boot
 if ! sudo grep -qF 'echo integrity > /sys/kernel/security/lockdown' /etc/rc.local; then
     sudo tee -a /etc/rc.local <<EOF
-echo integrity > /sys/kernel/security/lockdown
+if [ -r /sys/kernel/security/lockdown ] && grep -qF '[none]' /sys/kernel/security/lockdown 2>/dev/null; then
+    echo integrity > /sys/kernel/security/lockdown 2>/dev/null || :
+fi
 EOF
 fi
 
