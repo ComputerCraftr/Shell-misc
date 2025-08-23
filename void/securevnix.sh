@@ -1,7 +1,11 @@
 #!/bin/sh
 set -eu
 
-sudo xbps-install -Syu ufw nftables iptables-nft cryptsetup google-authenticator-libpam libqrencode spectre-meltdown-checker lynis linux-firmware socklog-void cronie chrony
+if command -v torsocks >/dev/null 2>&1; then
+    sudo torsocks xbps-install -Syu ufw nftables iptables-nft cryptsetup google-authenticator-libpam libqrencode spectre-meltdown-checker lynis linux-firmware socklog-void cronie chrony
+else
+    sudo xbps-install -Syu ufw nftables iptables-nft cryptsetup google-authenticator-libpam libqrencode spectre-meltdown-checker lynis linux-firmware socklog-void cronie chrony
+fi
 sudo xbps-alternatives -s iptables-nft
 
 sudo ln -sf /etc/sv/ufw /var/service
@@ -92,3 +96,6 @@ sudo sed -i \
     -e 's/^#\?AuthenticationMethods .*/AuthenticationMethods publickey,password publickey,keyboard-interactive/' \
     -e 's/^#\?UseDNS .*/UseDNS no/' \
     /etc/ssh/sshd_config
+
+# Restart SSH service
+echo 'sudo sv restart sshd'
