@@ -20,10 +20,16 @@ require_root() {
 
 update_sbctl() {
     echo "[+] Updating sbctl..."
-    if command -v torsocks >/dev/null 2>&1; then
-        torsocks xbps-install -Sy sbctl || die "Failed to update sbctl via torsocks"
+
+    # Check connectivity with ping
+    if ping -c 1 -W 1 -q "1.1.1.1" >/dev/null 2>&1; then
+        if command -v torsocks >/dev/null 2>&1; then
+            torsocks xbps-install -Sy sbctl || die "Failed to update sbctl via torsocks"
+        else
+            xbps-install -Sy sbctl || die "Failed to update sbctl"
+        fi
     else
-        xbps-install -Sy sbctl || die "Failed to update sbctl"
+        echo "[!] No internet connection. Please check your network."
     fi
 }
 
