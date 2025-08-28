@@ -22,7 +22,7 @@ update_sbctl() {
     echo "[+] Updating sbctl..."
 
     # Check connectivity with ping
-    if ping -c 1 -W 1 -q "1.1.1.1" >/dev/null 2>&1; then
+    if ping -c 1 -W 1 -q "google.com" >/dev/null 2>&1; then
         if command -v torsocks >/dev/null 2>&1; then
             torsocks xbps-install -Sy sbctl || die "Failed to update sbctl via torsocks"
         else
