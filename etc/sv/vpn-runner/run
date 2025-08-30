@@ -52,7 +52,7 @@ while [ -n "$CANDIDATE_LINES" ]; do
         ifconfig "$EXT_IF_NEW" up
 
         # Restart the DHCP client service on the interface.
-        service dhclient restart "$EXT_IF_NEW"
+        service dhclient restart "$EXT_IF_NEW" || true
 
         # Break out of the loop now that the interface is up.
         break
@@ -66,24 +66,28 @@ done
 SECONDS_WAITED=0
 DEFAULT_GW_IPV4=""
 
-while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
-    # For IPv4, extract the default gateway from netstat.
-    DEFAULT_GW_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $2; exit}')
-    if [ -n "$DEFAULT_GW_IPV4" ]; then
-        break
-    fi
-    sleep "$INTERVAL"
-    SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
-done
+if echo "$EXT_IF_NEW" | grep -q 'ue[0-9]'; then
+    while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
+        # For IPv4, extract the default gateway from netstat.
+        DEFAULT_GW_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $2; exit}')
+        if [ -n "$DEFAULT_GW_IPV4" ]; then
+            break
+        fi
+        sleep "$INTERVAL"
+        SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
+    done
 
-if [ -z "$DEFAULT_GW_IPV4" ]; then
-    log_err "Error: Failed to discover a default gateway after $GATEWAY_TIMEOUT seconds."
-    false
+    if [ -z "$DEFAULT_GW_IPV4" ]; then
+        log_err "Error: Failed to discover a default gateway after $GATEWAY_TIMEOUT seconds."
+        false
+    fi
+elif echo "$EXT_IF_NEW" | grep -q 'bce[0-2]'; then
+    DEFAULT_GW_IPV4="${EXT_GW_IPV4:-}"
 fi
 
 # Update the OpenVPN configuration.
 if [ "$EXT_IF_AVAILABLE" -eq 1 ] && [ -f "${OVPN_PROXY_AUTH:-}" ] &&
-    [ "$OVPN_PROXY_PORT" -gt 0 ] && echo "$EXT_IF_NEW" | grep -q 'ue[0-9]'; then
+    [ -n "$DEFAULT_GW_IPV4" ] && [ "$OVPN_PROXY_PORT" -gt 0 ]; then
     sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
         -e "s|__PROXY_STRING__|${DEFAULT_GW_IPV4} ${OVPN_PROXY_PORT}|" \
         -e "s|__PROXY_AUTH_FILE__|$OVPN_PROXY_AUTH|" \
