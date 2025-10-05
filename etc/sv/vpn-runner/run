@@ -102,7 +102,8 @@ if [ "$EXT_IF_AVAILABLE" -eq 1 ] && [ -f "${OVPN_PROXY_AUTH:-}" ] &&
         -e "s|__PROXY_AUTH_FILE__|$OVPN_PROXY_AUTH|" \
         "$OVPN_TEMPLATE" >"$OVPN_FILE"
 else
-    sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
+    sed -E -e "s|^proto [a-z]+$|proto udp|" \
+        -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
         -e "/__PROXY_STRING__/d" \
         -e "/__PROXY_AUTH_FILE__/d" \
         "$OVPN_TEMPLATE" >"$OVPN_FILE"
