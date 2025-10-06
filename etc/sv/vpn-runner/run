@@ -21,7 +21,7 @@ fi
 
 # Configuration: timeouts, intervals, and retry settings.
 OVPN_PROXY_PORT=$(tail -n 1 "${OVPN_PROXY_AUTH:-}" 2>/dev/null || echo 0)
-GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
+GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
 
 # Get current default gateway interface.

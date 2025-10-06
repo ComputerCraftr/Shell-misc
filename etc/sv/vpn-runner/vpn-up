@@ -22,7 +22,7 @@ log "Configured resolv.conf for VPN."
 # Configuration: timeouts, intervals, and retry settings.
 TUN_IF=$(awk '/dev / {print $2; exit}' <"$OVPN_TEMPLATE")
 IP_TIMEOUT=30      # Total seconds to wait for an IP address.
-GATEWAY_TIMEOUT=30 # Total seconds to wait for default gateway(s).
+GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
 
 # Ensure single instance using a simple PID-based lockfile.
