@@ -1,0 +1,24 @@
+#!/data/data/com.termux/files/usr/bin/sh
+set -eu
+
+TARGET="$(head -n 1 ./env/TARGET)"
+BIND_IP="0.0.0.0"
+PORT="${BIND_PORT:-21080}"
+
+# Optional: configure bind IP and validate it's not empty or blank
+if [ -f ./env/BIND_IP ]; then
+    BIND_IP="$(head -n 1 ./env/BIND_IP | tr -d '[:space:]')"
+    if [ -z "$BIND_IP" ]; then
+        BIND_IP="0.0.0.0"
+    fi
+fi
+
+# Allow override of bind port via env/BIND_PORT if set
+if [ -f ./env/BIND_PORT ]; then
+    PORT_OVERRIDE="$(head -n 1 ./env/BIND_PORT | tr -d '[:space:]')"
+    if [ -n "$PORT_OVERRIDE" ]; then
+        PORT="$PORT_OVERRIDE"
+    fi
+fi
+
+exec nice -n -20 ~/.bin/udp-forwarder "$BIND_IP":"$PORT" "$TARGET" --timeout-secs 10 --on-timeout exit
