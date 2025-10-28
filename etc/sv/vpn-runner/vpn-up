@@ -13,8 +13,10 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-cp /etc/resolv.conf.vpn /etc/resolv.conf
-log "Configured resolv.conf for VPN."
+if [ -f /etc/resolv.conf.vpn ]; then
+    cp /etc/resolv.conf.vpn /etc/resolv.conf
+    log "Configured resolv.conf for VPN."
+fi
 
 # Load environment variables from /usr/local/etc/.gateway-env.conf config file.
 . /usr/local/etc/.gateway-env.conf

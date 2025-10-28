@@ -13,5 +13,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-cp /etc/resolv.conf.bak /etc/resolv.conf
-log "Restored resolv.conf to default."
+if [ -f /etc/resolv.conf.bak ]; then
+    cp /etc/resolv.conf.bak /etc/resolv.conf
+    log "Restored resolv.conf to default."
+fi
