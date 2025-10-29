@@ -61,7 +61,7 @@ UPSERT_SQL=$(
 INSERT INTO pings(slot, latency_ms) VALUES(
     %SLOT%, %RTT%
 ) ON CONFLICT(slot) DO UPDATE SET
-    ts         = %TSUPD%,
+    ts         = CURRENT_TIMESTAMP,
     latency_ms = EXCLUDED.latency_ms;
 EOS
 )
@@ -74,12 +74,10 @@ case "$DB_TYPE" in
 sqlite)
     SED_SCHEMA='s/%TSTYPE%/DATETIME/g; s/%TSDEF%/CURRENT_TIMESTAMP/g'
     CLIENT_CMD="sqlite3 '$DB_FILE'"
-    TS_UPDATE='CURRENT_TIMESTAMP'
     ;;
 postgres)
     SED_SCHEMA='s/%TSTYPE%/TIMESTAMPTZ/g; s/%TSDEF%/now()/g'
     CLIENT_CMD="psql -qAt -h '$PGHOST' -p '$PGPORT' -U '$PGUSER' -d '$PGDATABASE'"
-    TS_UPDATE='now()'
     ;;
 *)
     echo "[pinger] ERROR: unsupported DB_TYPE='$DB_TYPE'" >&2
@@ -105,7 +103,7 @@ while :; do
     if [ -n "$rtt" ]; then
         # Render upsert SQL via sed
         SQL=$(echo "$UPSERT_SQL" |
-            sed "s/%SLOT%/$slot/; s/%RTT%/$rtt/; s/%TSUPD%/$TS_UPDATE/")
+            sed "s/%SLOT%/$slot/; s/%RTT%/$rtt/")
         echo "$SQL" | eval "$CLIENT_CMD"
         slot=$(((slot + 1) % RING_BUFFER_SIZE))
     fi
