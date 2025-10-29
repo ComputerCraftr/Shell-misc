@@ -17,10 +17,10 @@ sudo ln -sf /etc/sv/chronyd /var/service
 # Reset UFW to flush any existing rules and disable it
 sudo ufw --force reset
 sudo ufw enable
-sudo ufw allow in from 10.1.0.0/16 to any port 22,5201 proto tcp
-sudo ufw allow in from 10.1.0.0/16 to any port 5201 proto udp
-sudo ufw allow in from fe80::/10 to any port 22,5201 proto tcp
-sudo ufw allow in from fe80::/10 to any port 5201 proto udp
+sudo ufw allow in from 10.1.0.0/16 to any port 22 proto tcp
+sudo ufw allow in from 10.1.0.0/16 to any port 5201
+sudo ufw allow in from fe80::/10 to any port 22 proto tcp
+sudo ufw allow in from fe80::/10 to any port 5201
 
 # Set kernel lockdown if it is not currently active
 if [ -r /sys/kernel/security/lockdown ] && grep -qF '[none]' /sys/kernel/security/lockdown 2>/dev/null; then
