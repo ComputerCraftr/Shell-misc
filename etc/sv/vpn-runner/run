@@ -88,7 +88,7 @@ else
         false
     fi
 
-    if echo "$EXT_IF_NEW" | grep -q 'bce[3-9]'; then
+    if ! timeout 5 nc -z -4 "$DEFAULT_GW_IPV4" 5201 >/dev/null 2>&1; then
         # Connect directly to the server.
         OVPN_PROXY_PORT=0
     fi
