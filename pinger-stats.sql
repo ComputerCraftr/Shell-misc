@@ -341,10 +341,13 @@ SELECT metric,
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
-            MAX(
-                CASE
-                    WHEN idx = 1 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 1 THEN val
+                    END
+                ),
+                0
             ) AS INTEGER
         )
         ELSE printf(
@@ -364,10 +367,13 @@ SELECT metric,
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
-            MAX(
-                CASE
-                    WHEN idx = 2 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 2 THEN val
+                    END
+                ),
+                0
             ) AS INTEGER
         )
         ELSE printf(
@@ -387,10 +393,13 @@ SELECT metric,
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
-            MAX(
-                CASE
-                    WHEN idx = 3 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 3 THEN val
+                    END
+                ),
+                0
             ) AS INTEGER
         )
         ELSE printf(
@@ -410,10 +419,13 @@ SELECT metric,
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
-            MAX(
-                CASE
-                    WHEN idx = 4 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 4 THEN val
+                    END
+                ),
+                0
             ) AS INTEGER
         )
         ELSE printf(
@@ -433,10 +445,13 @@ SELECT metric,
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
-            MAX(
-                CASE
-                    WHEN idx = 5 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 5 THEN val
+                    END
+                ),
+                0
             ) AS INTEGER
         )
         ELSE printf(
@@ -456,10 +471,13 @@ SELECT metric,
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
-            MAX(
-                CASE
-                    WHEN idx = 6 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 6 THEN val
+                    END
+                ),
+                0
             ) AS INTEGER
         )
         ELSE printf(
@@ -479,10 +497,13 @@ SELECT metric,
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
-            MAX(
-                CASE
-                    WHEN idx = 7 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 7 THEN val
+                    END
+                ),
+                0
             ) AS INTEGER
         )
         ELSE printf(
@@ -502,10 +523,13 @@ SELECT metric,
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
-            MAX(
-                CASE
-                    WHEN idx = 8 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 8 THEN val
+                    END
+                ),
+                0
             ) AS INTEGER
         )
         ELSE printf(
