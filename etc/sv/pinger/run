@@ -95,10 +95,19 @@ case "$last_slot" in
 *) slot=$(((last_slot + 1) % RING_BUFFER_SIZE)) ;; # wrap
 esac
 
-# Main loop: ping, log, advance
+# Main loop: keep a strict 1 Hz cadence aligned to wall-clock seconds
 while :; do
-    rtt=$(ping6 -c 1 -W 1 -q "$TARGET" 2>/dev/null |
-        awk -F/ '/[Mm]in\/avg\/max/ {print $5}')
+    # Wait until the scheduled next whole second
+    while :; do
+        now=$(date -u +%s)
+        [ "$now" -ge "${next_tick:-0}" ] && break
+        # Fractional sleep is supported on FreeBSD sleep(1); use short naps
+        sleep 0.1
+    done
+    next_tick=$((now + 1))
+
+    # One probe with a 1-second timeout (BSD ping6 uses seconds for -W)
+    rtt=$(ping6 -c 1 -W 1 -q "$TARGET" 2>/dev/null | awk -F/ '/[Mm]in\/avg\/max/ {print $5; exit}')
 
     if [ -n "$rtt" ]; then
         # Render upsert SQL via sed
@@ -107,6 +116,4 @@ while :; do
         echo "$SQL" | eval "$CLIENT_CMD"
         slot=$(((slot + 1) % RING_BUFFER_SIZE))
     fi
-
-    sleep 1
 done
