@@ -1,4 +1,4 @@
-.mode column
+.mode column --
 -- pinger_stats.sql
 -- Usage:
 --   sqlite3 /var/db/pinger/pings.db < pinger_stats.sql
@@ -117,7 +117,7 @@ day_loss_percent AS (
     FROM day_observed o
         LEFT JOIN day_loss_events e USING (idx)
 ),
--- Build outages and clusters per day with 5s healing interval
+-- Build outages and clusters per day with 600s healing interval
 outages_day AS (
     SELECT idx,
         ts,
@@ -137,7 +137,7 @@ clusters_day AS (
                     PARTITION BY idx
                     ORDER BY start_sec
                 )
-            ) + 5 THEN 1
+            ) + 600 THEN 1
             ELSE 0
         END AS new_cluster_flag
     FROM outages_day
@@ -169,7 +169,7 @@ day_cluster_counts AS (
 ),
 day_cluster_medians AS (
     SELECT idx,
-        -- median cluster lost seconds
+        -- median cluster loss (s)
         (
             SELECT v
             FROM (
@@ -184,7 +184,7 @@ day_cluster_medians AS (
                 ) s
             WHERE rn = ((n + 1) / 2)
         ) AS med_cluster_lost_sec,
-        -- median cluster span seconds
+        -- median cluster span (s)
         (
             SELECT v
             FROM (
@@ -329,7 +329,7 @@ weekly_clusters AS (
                 LAG(end_sec) OVER (
                     ORDER BY start_sec
                 )
-            ) + 5 THEN 1
+            ) + 600 THEN 1
             ELSE 0
         END AS new_cluster_flag
     FROM weekly_outages
@@ -420,14 +420,14 @@ weekly_kv AS (
             FROM weekly_loss_percent
         )
     UNION ALL
-    SELECT 'Loss event clusters (heal=5s)',
+    SELECT 'Event clusters (600s)',
         8,
         (
             SELECT COUNT(*)
             FROM weekly_agg
         )
     UNION ALL
-    SELECT 'Median cluster lost seconds',
+    SELECT 'Median cluster loss (s)',
         8,
         COALESCE(
             (
@@ -452,7 +452,7 @@ weekly_kv AS (
             0
         )
     UNION ALL
-    SELECT 'Median cluster span seconds',
+    SELECT 'Median cluster span (s)',
         8,
         COALESCE(
             (
@@ -529,17 +529,17 @@ kv AS (
         loss_percent
     FROM day_loss_percent
     UNION ALL
-    SELECT 'Loss event clusters (heal=5s)',
+    SELECT 'Event clusters (600s)',
         idx,
         cluster_events
     FROM day_cluster_counts
     UNION ALL
-    SELECT 'Median cluster lost seconds',
+    SELECT 'Median cluster loss (s)',
         idx,
         med_cluster_lost_sec
     FROM day_cluster_medians
     UNION ALL
-    SELECT 'Median cluster span seconds',
+    SELECT 'Median cluster span (s)',
         idx,
         med_cluster_span_sec
     FROM day_cluster_medians
@@ -628,8 +628,8 @@ ORDER BY CASE
         WHEN 'Loss events' THEN 8
         WHEN 'Observed samples' THEN 9
         WHEN 'Loss percent (%)' THEN 10
-        WHEN 'Loss event clusters (heal=5s)' THEN 11
-        WHEN 'Median cluster lost seconds' THEN 12
-        WHEN 'Median cluster span seconds' THEN 13
+        WHEN 'Event clusters (600s)' THEN 11
+        WHEN 'Median cluster loss (s)' THEN 12
+        WHEN 'Median cluster span (s)' THEN 13
         ELSE 99
     END;
