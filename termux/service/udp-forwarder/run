@@ -1,15 +1,15 @@
 #!/data/data/com.termux/files/usr/bin/sh
 set -eu
 
-TARGET="$(head -n 1 ./env/TARGET)"
-BIND_IP="0.0.0.0"
+TARGET="$(head -n 1 ./env/TARGET | tr -d '[:space:]')"
+ADDR="${BIND_IP:-0.0.0.0}"
 PORT="${BIND_PORT:-21080}"
 
 # Optional: configure bind IP and validate it's not empty or blank
 if [ -f ./env/BIND_IP ]; then
-    BIND_IP="$(head -n 1 ./env/BIND_IP | tr -d '[:space:]')"
-    if [ -z "$BIND_IP" ]; then
-        BIND_IP="0.0.0.0"
+    ADDR_OVERRIDE="$(head -n 1 ./env/BIND_IP | tr -d '[:space:]')"
+    if [ -n "$ADDR_OVERRIDE" ]; then
+        ADDR="$ADDR_OVERRIDE"
     fi
 fi
 
@@ -21,4 +21,4 @@ if [ -f ./env/BIND_PORT ]; then
     fi
 fi
 
-exec nice -n -20 ~/.bin/udp-forwarder "$BIND_IP":"$PORT" "$TARGET" --timeout-secs 10 --on-timeout exit
+exec nice -n -20 ~/.bin/udp-forwarder "$ADDR":"$PORT" "$TARGET" --on-timeout exit
