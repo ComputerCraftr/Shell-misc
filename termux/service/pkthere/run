@@ -21,4 +21,4 @@ if [ -f ./env/BIND_PORT ]; then
     fi
 fi
 
-exec nice -n -20 ~/.bin/udp-forwarder "$ADDR":"$PORT" "$TARGET" --on-timeout exit
+exec nice -n -20 ~/.bin/pkthere --here "$ADDR":"$PORT" --there "$TARGET" --on-timeout exit --max-payload 0
