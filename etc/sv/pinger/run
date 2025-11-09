@@ -48,7 +48,7 @@ INIT_SCHEMA_SQL=$(
 -- SQLite or PostgreSQL schema initialization
 CREATE TABLE IF NOT EXISTS pings (
     slot       INTEGER PRIMARY KEY,
-    ts         %TSTYPE% NOT NULL DEFAULT %TSDEF% UNIQUE,
+    ts         %TSTYPE% NOT NULL DEFAULT CURRENT_TIMESTAMP UNIQUE,
     latency_ms REAL   NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pings_ts ON pings(ts);
@@ -72,11 +72,11 @@ SELECT_LAST_SLOT="SELECT slot FROM pings ORDER BY ts DESC LIMIT 1;"
 # Determine client command and schema substitutions
 case "$DB_TYPE" in
 sqlite)
-    SED_SCHEMA='s/%TSTYPE%/DATETIME/g; s/%TSDEF%/CURRENT_TIMESTAMP/g'
+    SED_SCHEMA='s/%TSTYPE%/DATETIME/g'
     CLIENT_CMD="sqlite3 '$DB_FILE'"
     ;;
 postgres)
-    SED_SCHEMA='s/%TSTYPE%/TIMESTAMPTZ/g; s/%TSDEF%/now()/g'
+    SED_SCHEMA='s/%TSTYPE%/TIMESTAMPTZ/g'
     CLIENT_CMD="psql -qAt -h '$PGHOST' -p '$PGPORT' -U '$PGUSER' -d '$PGDATABASE'"
     ;;
 *)
