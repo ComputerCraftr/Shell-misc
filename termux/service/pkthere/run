@@ -2,6 +2,7 @@
 set -eu
 
 TARGET="$(head -n 1 ./env/TARGET | tr -d '[:space:]')"
+PROTO="${BIND_PROTO:-UDP}"
 ADDR="${BIND_IP:-0.0.0.0}"
 PORT="${BIND_PORT:-21080}"
 
@@ -21,4 +22,4 @@ if [ -f ./env/BIND_PORT ]; then
     fi
 fi
 
-exec nice -n -20 ~/.bin/pkthere --here "$ADDR":"$PORT" --there "$TARGET" --on-timeout exit --max-payload 0
+exec nice -n -20 ~/.bin/pkthere --here "${PROTO}:${ADDR}:${PORT}" --there "${TARGET}" --on-timeout exit --max-payload 0
