@@ -1,2 +1,17 @@
 #!/data/data/com.termux/files/usr/bin/sh
-exec nice -n -20 ~/.bin/3proxy ~/.3proxy.cfg
+set -eu
+
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+TERMUX_HOME="${HOME:-${PREFIX%/usr}/home}"
+PROXY_BIN="${PREFIX}/bin/3proxy"
+PROXY_CFG="${PREFIX}/etc/3proxy.cfg"
+
+if [ ! -x "$PROXY_BIN" ] && [ -x "${TERMUX_HOME}/.bin/3proxy" ]; then
+    PROXY_BIN="${TERMUX_HOME}/.bin/3proxy"
+fi
+
+if [ ! -f "$PROXY_CFG" ] && [ -f "${TERMUX_HOME}/.3proxy.cfg" ]; then
+    PROXY_CFG="${TERMUX_HOME}/.3proxy.cfg"
+fi
+
+exec nice -n -20 "$PROXY_BIN" "$PROXY_CFG"

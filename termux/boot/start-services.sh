@@ -1,3 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+
 termux-wake-lock
-source /data/data/com.termux/files/usr/etc/profile.d/start-services.sh
+# shellcheck source=/dev/null
+source "${PREFIX}/etc/profile.d/start-services.sh"

@@ -1,2 +1,4 @@
 #!/data/data/com.termux/files/usr/bin/sh
-exec /data/data/com.termux/files/usr/share/termux-services/svlogger "$@"
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+
+exec "${PREFIX}/share/termux-services/svlogger" "$@"

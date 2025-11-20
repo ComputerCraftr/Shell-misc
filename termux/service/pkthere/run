@@ -1,6 +1,14 @@
 #!/data/data/com.termux/files/usr/bin/sh
 set -eu
 
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+TERMUX_HOME="${HOME:-${PREFIX%/usr}/home}"
+PKTHERE_BIN="${PREFIX}/bin/pkthere"
+
+if [ ! -x "$PKTHERE_BIN" ] && [ -x "${TERMUX_HOME}/.bin/pkthere" ]; then
+    PKTHERE_BIN="${TERMUX_HOME}/.bin/pkthere"
+fi
+
 TARGET="$(head -n 1 ./env/TARGET | tr -d '[:space:]')"
 PROTO="${BIND_PROTO:-UDP}"
 ADDR="${BIND_IP:-0.0.0.0}"
@@ -22,4 +30,4 @@ if [ -f ./env/BIND_PORT ]; then
     fi
 fi
 
-exec nice -n -20 ~/.bin/pkthere --here "${PROTO}:${ADDR}:${PORT}" --there "${TARGET}" --on-timeout exit --max-payload 0
+exec nice -n -20 "$PKTHERE_BIN" --here "${PROTO}:${ADDR}:${PORT}" --there "${TARGET}" --on-timeout exit --max-payload 0
