@@ -1,6 +1,6 @@
 #!/bin/sh
-# Prerequisites (FreeBSD):
-#   pw useradd -n iperf3 -c "iperf3 service" -s /usr/sbin/nologin -d /nonexistent -w no
-# Prerequisites (Void Linux):
-#   useradd -c "iperf3 service" -s /usr/sbin/nologin -d /nonexistent -M -r -U iperf3
-exec chpst -u iperf3 iperf3 -s -1
+# iperf3 runit run: start iperf3 server under a dynamic unprivileged user
+PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin"
+export PATH
+
+exec run-dynamic-user --service iperf3 -- iperf3 -s -1

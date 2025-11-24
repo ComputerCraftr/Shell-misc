@@ -1,0 +1,6 @@
+#!/bin/sh
+# iperf3 runit finish: clean up dynamic user and runtime state
+PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin"
+export PATH
+
+exec finish-dynamic-user --service iperf3
