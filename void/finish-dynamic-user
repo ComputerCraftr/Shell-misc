@@ -1,9 +1,9 @@
 #!/bin/sh
 # finish-dynamic-user: cleanup dynamic user and service runtime directory
-# Usage (in service finish script): exec /path/to/finish-dynamic-user
+# Usage (in service finish script): exec /path/to/finish-dynamic-user --service NAME
 # Example runit finish script:
 #   #!/bin/sh
-#   exec /path/to/finish-dynamic-user
+#   exec /path/to/finish-dynamic-user --service myservice
 
 set -eu
 umask 077
@@ -14,25 +14,34 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 usage() {
-    echo "Usage: $0" >&2
+    echo "Usage: $0 --service NAME" >&2
     exit 1
 }
 
-# No arguments expected; allow --help
-case "${1-}" in
-"") ;;
---help | -h) usage ;;
-*) usage ;;
-esac
+SERVICE=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+    --service)
+        SERVICE="${2-}"
+        case "$SERVICE" in
+        [A-Za-z0-9_-]*) ;;
+        *) usage ;;
+        esac
+        shift 2
+        ;;
+    --help|-h)
+        usage
+        ;;
+    *)
+        usage
+        ;;
+    esac
+done
 
-SERVICE="$(basename "$PWD")"
-case "$SERVICE" in
-[A-Za-z0-9_-]*) ;;
-*)
-    echo "Invalid service name: $SERVICE" >&2
-    exit 1
-    ;;
-esac
+if [ -z "$SERVICE" ]; then
+    echo "Service name is required (use --service)." >&2
+    usage
+fi
 
 SRV_RUN="/run/${SERVICE}"
 PERSIST_BASE="/var/lib/runit-dynuser"
