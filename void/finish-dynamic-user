@@ -1,16 +1,31 @@
 #!/bin/sh
-# cleanup dynamic user and service runtime directory
-set -eu
+# finish-dynamic-user: cleanup dynamic user and service runtime directory
+# Usage (in service finish script): exec /path/to/finish-dynamic-user
+# Example runit finish script:
+#   #!/bin/sh
+#   exec /path/to/finish-dynamic-user
 
-# Ensure script runs as root
+set -eu
+umask 077
+
 if [ "$(id -u)" -ne 0 ]; then
     echo "Error: This script must be run as root." >&2
     exit 1
 fi
 
-# SERVICE is basename of working directory
+usage() {
+    echo "Usage: $0" >&2
+    exit 1
+}
+
+# No arguments expected; allow --help
+case "${1-}" in
+"") ;;
+--help | -h) usage ;;
+*) usage ;;
+esac
+
 SERVICE="$(basename "$PWD")"
-# Validate SERVICE
 case "$SERVICE" in
 [A-Za-z0-9_-]*) ;;
 *)
@@ -20,20 +35,68 @@ case "$SERVICE" in
 esac
 
 SRV_RUN="/run/${SERVICE}"
-IDFILE="$SRV_RUN/identity"
+PERSIST_BASE="/var/lib/runit-dynuser"
+PERSIST_DIR="${PERSIST_BASE}/${SERVICE}"
+PERSIST_ID="${PERSIST_DIR}/identity"
 
-# If identity file missing, nothing to clean
-[ -f "$IDFILE" ] || exit 0
+[ -L "$SRV_RUN" ] && {
+    echo "Refusing to touch symlinked runtime directory $SRV_RUN" >&2
+    exit 1
+}
 
-# Read identity (ignore extra fields)
-IFS=':' read -r USER UID GROUP _ <"$IDFILE"
+[ -L "$PERSIST_DIR" ] && {
+    echo "Refusing to touch symlinked persistent directory $PERSIST_DIR" >&2
+    exit 1
+}
 
-# Terminate any remaining processes of this user
-pkill -u "$UID" || true
+if [ ! -f "$PERSIST_ID" ] && [ ! -d "$SRV_RUN" ]; then
+    exit 0
+fi
 
-# Remove dynamic user and group
-userdel "$USER" || true
-groupdel "$GROUP" || true
+if [ ! -f "$PERSIST_ID" ]; then
+    rm -rf "$SRV_RUN" "$PERSIST_DIR"
+    exit 0
+fi
 
-# Clean up service runtime dir
-rm -rf "$SRV_RUN"
+IFS=':' read -r USER UID GROUP GID <"$PERSIST_ID"
+
+case "$USER" in
+svc_${SERVICE}_*) ;;
+*)
+    echo "Refusing to delete unexpected user $USER for service $SERVICE" >&2
+    exit 1
+    ;;
+esac
+
+case "$GROUP" in
+"$USER") ;;
+*)
+    echo "Refusing to delete unexpected group $GROUP for service $SERVICE" >&2
+    exit 1
+    ;;
+esac
+
+case "$UID" in
+'' | *[!0-9]*)
+    echo "Invalid UID recorded for $SERVICE" >&2
+    exit 1
+    ;;
+esac
+
+case "$GID" in
+'' | *[!0-9]*)
+    echo "Invalid GID recorded for $SERVICE" >&2
+    exit 1
+    ;;
+esac
+
+if pgrep -u "$UID" >/dev/null 2>&1; then
+    pkill -TERM -u "$UID" >/dev/null 2>&1 || true
+    sleep 1
+    pkill -KILL -u "$UID" >/dev/null 2>&1 || true
+fi
+
+userdel -f "$USER" >/dev/null 2>&1 || true
+groupdel "$GROUP" >/dev/null 2>&1 || true
+
+rm -rf "$SRV_RUN" "$PERSIST_DIR"

@@ -1,11 +1,13 @@
 #!/bin/sh
 # run-dynamic-user: wrapper to launch a runit service with a secure, unprivileged dynamic user
-# Usage (in service run script): run-dynamic-user [--create-home] -- <command> [args...]
+# Usage (in service run script): /path/to/run-dynamic-user [--create-home] -- <command> [args...]
+# Example runit run script:
+#   #!/bin/sh
+#   exec /path/to/run-dynamic-user --create-home -- your-daemon --flags
 
-# Exit on unset variables and errors
 set -eu
+umask 077
 
-# Ensure script runs as root
 if [ "$(id -u)" -ne 0 ]; then
     echo "Error: This script must be run as root." >&2
     exit 1
@@ -16,25 +18,27 @@ usage() {
     exit 1
 }
 
-# Parse --create-home option
 enable_home=false
-if [ "$1" = "--create-home" ]; then
-    enable_home=true
-    shift
-fi
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+    --create-home)
+        enable_home=true
+        shift
+        ;;
+    --)
+        shift
+        break
+        ;;
+    *)
+        usage
+        ;;
+    esac
+done
 
-# Expect '--' separator next
-action="${1:-}"
-shift || true
-if [ "$action" != "--" ]; then
-    echo "Missing '--' after options." >&2
-    usage
-fi
+[ "$#" -ge 1 ] || usage
 
-# THE SERVICE NAME is derived from the working directory (runit sets PWD to svc dir)
+# The service name is derived from the working directory (runit sets PWD to svc dir)
 SERVICE="$(basename "$PWD")"
-
-# Validate SERVICE
 case "$SERVICE" in
 [A-Za-z0-9_-]*) ;;
 *)
@@ -43,35 +47,100 @@ case "$SERVICE" in
     ;;
 esac
 
-# Define runtime directory for this service
-SRV_RUN="/run/${SERVICE}"
+SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P)
+FINISH_HELPER="$SCRIPT_DIR/finish-dynamic-user"
 
-# Abort if SRV_RUN already exists
-if [ -e "$SRV_RUN" ]; then
-    echo "Runtime directory $SRV_RUN already exists; aborting to avoid conflicts." >&2
+SRV_RUN="/run/${SERVICE}"
+PERSIST_BASE="/var/lib/runit-dynuser"
+PERSIST_DIR="${PERSIST_BASE}/${SERVICE}"
+PERSIST_ID="${PERSIST_DIR}/identity"
+
+if [ -L "$SRV_RUN" ]; then
+    echo "Refusing to use symlinked runtime directory $SRV_RUN" >&2
     exit 1
 fi
 
-# Create and secure SRV_RUN
-dmkdir -p "$SRV_RUN"
-chmod 700 "$SRV_RUN"
-
-# Determine dynamic home path or /nonexistent
-if [ "$enable_home" = true ]; then
-    DYN_HOME="$SRV_RUN/home"
-else
-    DYN_HOME="/nonexistent"
+if [ -e "$SRV_RUN" ]; then
+    STALE="true"
 fi
 
-# Generate random suffix
-dynrand=$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 10)
-USER="svc_${SERVICE}_${dynrand}"
-GROUP="$USER"
+if [ -L "$PERSIST_DIR" ]; then
+    echo "Refusing to use symlinked persistent directory $PERSIST_DIR" >&2
+    exit 1
+fi
 
-# Allocate unused UID and GID
+if [ -e "$PERSIST_ID" ]; then
+    STALE="true"
+fi
+
+if [ "${STALE-}" = "true" ]; then
+    if [ ! -x "$FINISH_HELPER" ]; then
+        echo "Stale dynamic user state detected but $FINISH_HELPER is not executable." >&2
+        exit 1
+    fi
+    echo "Stale dynamic user state detected; invoking finish-dynamic-user for $SERVICE" >&2
+    if ! "$FINISH_HELPER"; then
+        echo "Failed to clean previous dynamic user state for $SERVICE." >&2
+        exit 1
+    fi
+fi
+
+if [ -e "$SRV_RUN" ] || [ -e "$PERSIST_ID" ]; then
+    echo "Refusing to start: dynamic user state still present for $SERVICE." >&2
+    exit 1
+fi
+
 UID=""
 GID=""
-for id in $(seq 60000 64000); do
+CLEAN_USER=""
+CLEAN_GROUP=""
+CLEAN_PERSIST=false
+cleanup() {
+    # Cleanup only runs if setup fails before exec
+    if [ -n "$CLEAN_USER" ] && [ -n "$UID" ]; then
+        pkill -u "$UID" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$CLEAN_USER" ]; then
+        userdel "$CLEAN_USER" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$CLEAN_GROUP" ]; then
+        groupdel "$CLEAN_GROUP" >/dev/null 2>&1 || true
+    fi
+    if [ -d "$SRV_RUN" ]; then
+        rm -rf "$SRV_RUN"
+    fi
+    if [ "$CLEAN_PERSIST" = true ] && [ -d "$PERSIST_DIR" ]; then
+        rm -rf "$PERSIST_DIR"
+    fi
+}
+trap cleanup EXIT INT TERM
+
+install -d -m 700 -o root -g root "$SRV_RUN"
+install -d -m 700 -o root -g root "$PERSIST_DIR"
+CLEAN_PERSIST=true
+
+DYN_HOME="/nonexistent"
+[ "$enable_home" = true ] && DYN_HOME="$SRV_RUN/home"
+
+# Generate a unique dynamic user/group name
+USER=""
+GROUP=""
+for _ in 1 2 3 4 5; do
+    dynrand=$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 10)
+    candidate="svc_${SERVICE}_${dynrand}"
+    if ! getent passwd "$candidate" >/dev/null 2>&1 && ! getent group "$candidate" >/dev/null 2>&1; then
+        USER="$candidate"
+        GROUP="$candidate"
+        break
+    fi
+done
+
+if [ -z "$USER" ] || [ -z "$GROUP" ]; then
+    echo "Unable to generate unique dynamic user name." >&2
+    exit 1
+fi
+
+for id in $(seq 60000 64999); do
     if ! getent passwd "$id" >/dev/null 2>&1 && ! getent group "$id" >/dev/null 2>&1; then
         UID="$id"
         GID="$id"
@@ -84,25 +153,20 @@ if [ -z "$UID" ] || [ -z "$GID" ]; then
     exit 1
 fi
 
-# Create group and dynamic system user
 groupadd -g "$GID" "$GROUP"
+CLEAN_GROUP="$GROUP"
 useradd -u "$UID" -g "$GROUP" -d "$DYN_HOME" -M -N -r -s /usr/sbin/nologin "$USER"
+CLEAN_USER="$USER"
 
-# If requested, create and secure home directory
 if [ "$enable_home" = true ]; then
-    mkdir -p "$DYN_HOME"
-    chown "$USER:$GROUP" "$DYN_HOME"
-    chmod 700 "$DYN_HOME"
+    install -d -m 700 -o "$USER" -g "$GROUP" "$DYN_HOME"
 fi
 
-# Persist identity for finish script
-echo "$USER:$UID:$GROUP:$GID" >"$SRV_RUN/identity"
-chmod 600 "$SRV_RUN/identity"
+printf '%s:%s:%s:%s\n' "$USER" "$UID" "$GROUP" "$GID" >"$PERSIST_ID"
+chmod 600 "$PERSIST_ID"
 
-# Prepare work directory inside SRV_RUN
 WORKDIR="$SRV_RUN/work"
-mkdir -p "$WORKDIR"
-chown "$USER:$GROUP" "$WORKDIR"
+install -d -m 700 -o "$USER" -g "$GROUP" "$WORKDIR"
 
 # Finally, execute the daemon under the dynamic user
 exec chpst -u "$USER:$GROUP" -- "$@"
