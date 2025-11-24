@@ -29,7 +29,7 @@ while [ "$#" -gt 0 ]; do
         esac
         shift 2
         ;;
-    --help|-h)
+    --help | -h)
         usage
         ;;
     *)
@@ -43,8 +43,40 @@ if [ -z "$SERVICE" ]; then
     usage
 fi
 
-SRV_RUN="/run/${SERVICE}"
-PERSIST_BASE="/var/lib/runit-dynuser"
+OS="$(uname -s)"
+case "$OS" in
+Linux) RUNTIME_BASE="/run" ;;
+FreeBSD) RUNTIME_BASE="/var/run" ;;
+*)
+    echo "Unsupported OS: $OS" >&2
+    exit 1
+    ;;
+esac
+[ -d "$RUNTIME_BASE" ] || RUNTIME_BASE="/run"
+
+if [ -d "/var/lib" ]; then
+    PERSIST_BASE="/var/lib/runit-dynuser"
+else
+    PERSIST_BASE="/var/db/runit-dynuser"
+fi
+
+del_user() {
+    name="$1"
+    case "$OS" in
+    Linux) userdel -f "$name" ;;
+    FreeBSD) pw userdel -n "$name" -r ;;
+    esac
+}
+
+del_group() {
+    name="$1"
+    case "$OS" in
+    Linux) groupdel "$name" ;;
+    FreeBSD) pw groupdel -n "$name" ;;
+    esac
+}
+
+SRV_RUN="${RUNTIME_BASE}/${SERVICE}"
 PERSIST_DIR="${PERSIST_BASE}/${SERVICE}"
 PERSIST_ID="${PERSIST_DIR}/identity"
 
@@ -105,7 +137,7 @@ if pgrep -u "$UID" >/dev/null 2>&1; then
     pkill -KILL -u "$UID" >/dev/null 2>&1 || true
 fi
 
-userdel -f "$USER" >/dev/null 2>&1 || true
-groupdel "$GROUP" >/dev/null 2>&1 || true
+del_user "$USER" >/dev/null 2>&1 || true
+del_group "$GROUP" >/dev/null 2>&1 || true
 
 rm -rf "$SRV_RUN" "$PERSIST_DIR"

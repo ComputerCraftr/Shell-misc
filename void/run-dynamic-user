@@ -51,11 +51,67 @@ if [ -z "$SERVICE" ]; then
     usage
 fi
 
+OS="$(uname -s)"
+case "$OS" in
+Linux) RUNTIME_BASE="/run" ;;
+FreeBSD) RUNTIME_BASE="/var/run" ;;
+*)
+    echo "Unsupported OS: $OS" >&2
+    exit 1
+    ;;
+esac
+[ -d "$RUNTIME_BASE" ] || RUNTIME_BASE="/run"
+
+if [ -d "/var/lib" ]; then
+    PERSIST_BASE="/var/lib/runit-dynuser"
+else
+    PERSIST_BASE="/var/db/runit-dynuser"
+fi
+
+add_group() {
+    name="$1"
+    gid="$2"
+    case "$OS" in
+    Linux) groupadd -g "$gid" "$name" ;;
+    FreeBSD) pw groupadd -n "$name" -g "$gid" ;;
+    esac
+}
+
+add_user() {
+    name="$1"
+    uid="$2"
+    gid="$3"
+    home="$4"
+    case "$OS" in
+    Linux)
+        useradd -u "$uid" -g "$gid" -d "$home" -M -N -r -s /usr/sbin/nologin "$name"
+        ;;
+    FreeBSD)
+        pw useradd -n "$name" -u "$uid" -g "$gid" -d "$home" -w no -s /usr/sbin/nologin
+        ;;
+    esac
+}
+
+del_user() {
+    name="$1"
+    case "$OS" in
+    Linux) userdel -f "$name" ;;
+    FreeBSD) pw userdel -n "$name" -r ;;
+    esac
+}
+
+del_group() {
+    name="$1"
+    case "$OS" in
+    Linux) groupdel "$name" ;;
+    FreeBSD) pw groupdel -n "$name" ;;
+    esac
+}
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P)
 FINISH_HELPER="$SCRIPT_DIR/finish-dynamic-user"
 
-SRV_RUN="/run/${SERVICE}"
-PERSIST_BASE="/var/lib/runit-dynuser"
+SRV_RUN="${RUNTIME_BASE}/${SERVICE}"
 PERSIST_DIR="${PERSIST_BASE}/${SERVICE}"
 PERSIST_ID="${PERSIST_DIR}/identity"
 
@@ -105,10 +161,10 @@ cleanup() {
         pkill -u "$UID" >/dev/null 2>&1 || true
     fi
     if [ -n "$CLEAN_USER" ]; then
-        userdel "$CLEAN_USER" >/dev/null 2>&1 || true
+        del_user "$CLEAN_USER" >/dev/null 2>&1 || true
     fi
     if [ -n "$CLEAN_GROUP" ]; then
-        groupdel "$CLEAN_GROUP" >/dev/null 2>&1 || true
+        del_group "$CLEAN_GROUP" >/dev/null 2>&1 || true
     fi
     if [ -d "$SRV_RUN" ]; then
         rm -rf "$SRV_RUN"
@@ -157,9 +213,9 @@ if [ -z "$UID" ] || [ -z "$GID" ]; then
     exit 1
 fi
 
-groupadd -g "$GID" "$GROUP"
+add_group "$GROUP" "$GID"
 CLEAN_GROUP="$GROUP"
-useradd -u "$UID" -g "$GROUP" -d "$DYN_HOME" -M -N -r -s /usr/sbin/nologin "$USER"
+add_user "$USER" "$UID" "$GROUP" "$DYN_HOME"
 CLEAN_USER="$USER"
 
 if [ "$enable_home" = true ]; then
