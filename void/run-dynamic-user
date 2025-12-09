@@ -111,6 +111,8 @@ del_group() {
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P)
 FINISH_HELPER="$SCRIPT_DIR/finish-dynamic-user"
 
+ROOT_GROUP="$(id -gn 0)"
+
 SRV_RUN="${RUNTIME_BASE}/${SERVICE}"
 PERSIST_DIR="${PERSIST_BASE}/${SERVICE}"
 PERSIST_ID="${PERSIST_DIR}/identity"
@@ -175,8 +177,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-install -d -m 700 -o root -g root "$SRV_RUN"
-install -d -m 700 -o root -g root "$PERSIST_DIR"
+install -d -m 700 -o root -g "$ROOT_GROUP" "$SRV_RUN"
+install -d -m 700 -o root -g "$ROOT_GROUP" "$PERSIST_DIR"
 CLEAN_PERSIST=true
 
 DYN_HOME="/nonexistent"
