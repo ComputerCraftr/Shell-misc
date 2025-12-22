@@ -61,29 +61,31 @@ fi
 pam_file=/etc/pam.d/sshd
 ga_line="auth requisite pam_google_authenticator.so"
 pw_line="auth requisite pam_unix.so"
+ga_re='^auth[[:space:]]+requisite[[:space:]]+pam_google_authenticator\.so([[:space:]]|$)'
+pw_re='^auth[[:space:]]+requisite[[:space:]]+pam_unix\.so([[:space:]]|$)'
 
 # Determine which include directive exists (system-auth or common-auth)
-if sudo grep -qE '^auth\s+include\s+system-auth' "$pam_file"; then
+if sudo grep -qE '^auth[[:space:]]+include[[:space:]]+system-auth' "$pam_file"; then
     target='system-auth'
-elif sudo grep -qE '^auth\s+include\s+common-auth' "$pam_file"; then
+elif sudo grep -qE '^auth[[:space:]]+include[[:space:]]+common-auth' "$pam_file"; then
     target='common-auth'
 else
     target=''
 fi
 
 # Insert Google Authenticator line if missing
-if ! sudo grep -qF "$ga_line" "$pam_file"; then
+if ! sudo grep -qE "$ga_re" "$pam_file"; then
     if [ -n "$target" ]; then
-        sudo sed -i "/^auth include $target/i $ga_line" "$pam_file"
+        sudo sed -i -E "/^auth[[:space:]]+include[[:space:]]+$target/i $ga_line" "$pam_file"
     else
         sudo sed -i "1i $ga_line" "$pam_file"
     fi
 fi
 
 # Insert Unix auth line if missing, placing it immediately after the GA line or at top
-if ! sudo grep -qF "$pw_line" "$pam_file"; then
-    if sudo grep -qF "$ga_line" "$pam_file"; then
-        sudo sed -i "/$ga_line/a $pw_line" "$pam_file"
+if ! sudo grep -qE "$pw_re" "$pam_file"; then
+    if sudo grep -qE "$ga_re" "$pam_file"; then
+        sudo sed -i -E "/$ga_re/a $pw_line" "$pam_file"
     else
         sudo sed -i "1i $pw_line" "$pam_file"
     fi
