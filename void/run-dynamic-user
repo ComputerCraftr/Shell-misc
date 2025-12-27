@@ -1,6 +1,7 @@
 #!/bin/sh
-# run-dynamic-user: wrapper to launch a runit service with a secure, unprivileged dynamic user
+# run-dynamic-user: wrapper to launch or cleanup a runit service with a secure, unprivileged dynamic user
 # Usage (in service run script): /path/to/run-dynamic-user --service NAME [--create-home] -- <command> [args...]
+# Usage (in service finish script): /path/to/run-dynamic-user --finish --service NAME
 # Example runit run script:
 #   #!/bin/sh
 #   exec /path/to/run-dynamic-user --service myservice --create-home -- your-daemon --flags
@@ -15,13 +16,19 @@ fi
 
 usage() {
     echo "Usage: $0 --service NAME [--create-home] -- <command> [args...]" >&2
+    echo "       $0 --finish --service NAME" >&2
     exit 1
 }
 
+finish=false
 enable_home=false
 SERVICE=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
+    --finish)
+        finish=true
+        shift
+        ;;
     --service)
         SERVICE="${2-}"
         case "$SERVICE" in
@@ -34,6 +41,9 @@ while [ "$#" -gt 0 ]; do
         enable_home=true
         shift
         ;;
+    --help | -h)
+        usage
+        ;;
     --)
         shift
         break
@@ -44,11 +54,16 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-[ "$#" -ge 1 ] || usage
-
 if [ -z "$SERVICE" ]; then
     echo "Service name is required (use --service)." >&2
     usage
+fi
+
+if [ "$finish" = true ]; then
+    [ "$enable_home" = false ] || usage
+    [ "$#" -eq 0 ] || usage
+else
+    [ "$#" -ge 1 ] || usage
 fi
 
 OS="$(uname -s)"
@@ -108,14 +123,76 @@ del_group() {
     esac
 }
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P)
-FINISH_HELPER="$SCRIPT_DIR/finish-dynamic-user"
-
 ROOT_GROUP="$(id -gn 0)"
 
 SRV_RUN="${RUNTIME_BASE}/${SERVICE}"
 PERSIST_DIR="${PERSIST_BASE}/${SERVICE}"
 PERSIST_ID="${PERSIST_DIR}/identity"
+
+if [ "$finish" = true ]; then
+    [ -L "$SRV_RUN" ] && {
+        echo "Refusing to touch symlinked runtime directory $SRV_RUN" >&2
+        exit 1
+    }
+
+    [ -L "$PERSIST_DIR" ] && {
+        echo "Refusing to touch symlinked persistent directory $PERSIST_DIR" >&2
+        exit 1
+    }
+
+    if [ ! -f "$PERSIST_ID" ] && [ ! -d "$SRV_RUN" ]; then
+        exit 0
+    fi
+
+    if [ ! -f "$PERSIST_ID" ]; then
+        rm -rf "$SRV_RUN" "$PERSIST_DIR"
+        exit 0
+    fi
+
+    IFS=':' read -r USER UID GROUP GID <"$PERSIST_ID"
+
+    case "$USER" in
+    svc_${SERVICE}_*) ;;
+    *)
+        echo "Refusing to delete unexpected user $USER for service $SERVICE" >&2
+        exit 1
+        ;;
+    esac
+
+    case "$GROUP" in
+    "$USER") ;;
+    *)
+        echo "Refusing to delete unexpected group $GROUP for service $SERVICE" >&2
+        exit 1
+        ;;
+    esac
+
+    case "$UID" in
+    '' | *[!0-9]*)
+        echo "Invalid UID recorded for $SERVICE" >&2
+        exit 1
+        ;;
+    esac
+
+    case "$GID" in
+    '' | *[!0-9]*)
+        echo "Invalid GID recorded for $SERVICE" >&2
+        exit 1
+        ;;
+    esac
+
+    if pgrep -u "$UID" >/dev/null 2>&1; then
+        pkill -TERM -u "$UID" >/dev/null 2>&1 || true
+        sleep 1
+        pkill -KILL -u "$UID" >/dev/null 2>&1 || true
+    fi
+
+    del_user "$USER" >/dev/null 2>&1 || true
+    del_group "$GROUP" >/dev/null 2>&1 || true
+
+    rm -rf "$SRV_RUN" "$PERSIST_DIR"
+    exit 0
+fi
 
 if [ -L "$SRV_RUN" ]; then
     echo "Refusing to use symlinked runtime directory $SRV_RUN" >&2
@@ -136,12 +213,8 @@ if [ -e "$PERSIST_ID" ]; then
 fi
 
 if [ "${STALE-}" = "true" ]; then
-    if [ ! -x "$FINISH_HELPER" ]; then
-        echo "Stale dynamic user state detected but $FINISH_HELPER is not executable." >&2
-        exit 1
-    fi
-    echo "Stale dynamic user state detected; invoking finish-dynamic-user for $SERVICE" >&2
-    if ! "$FINISH_HELPER" --service "$SERVICE"; then
+    echo "Stale dynamic user state detected; invoking cleanup for $SERVICE" >&2
+    if ! "$0" --finish --service "$SERVICE"; then
         echo "Failed to clean previous dynamic user state for $SERVICE." >&2
         exit 1
     fi

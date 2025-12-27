@@ -3,4 +3,4 @@
 PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin"
 export PATH
 
-exec finish-dynamic-user --service iperf3
+exec run-dynamic-user --finish --service iperf3
