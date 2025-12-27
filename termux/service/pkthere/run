@@ -30,4 +30,4 @@ if [ -f ./env/BIND_PORT ]; then
     fi
 fi
 
-exec nice -n -20 "$PKTHERE_BIN" --here "${PROTO}:${ADDR}:${PORT}" --there "${TARGET}" --on-timeout exit --timeout-secs 10 --workers 1 --max-payload 0
+exec nice -n -20 "$PKTHERE_BIN" --here "${PROTO}:${ADDR}:${PORT}" --there "${TARGET}" --on-timeout exit --timeout-secs 10 --workers 1 --max-payload 1500
