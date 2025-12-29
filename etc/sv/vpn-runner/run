@@ -109,5 +109,11 @@ else
         "$OVPN_TEMPLATE" >"$OVPN_FILE"
 fi
 
-# Start the OpenVPN service.
-exec openvpn --syslog openvpn --config "$OVPN_FILE" --writepid /var/run/openvpn.pid
+# Start the OpenVPN service with elevated priority to reduce latency.
+if command -v rtprio >/dev/null 2>&1; then
+    # Realtime class priority 10 (0 highest).
+    exec rtprio 10 openvpn --syslog openvpn --config "$OVPN_FILE" --writepid /var/run/openvpn.pid
+else
+    # Fallback to highest nice if rtprio is unavailable.
+    exec nice -n -20 openvpn --syslog openvpn --config "$OVPN_FILE" --writepid /var/run/openvpn.pid
+fi
