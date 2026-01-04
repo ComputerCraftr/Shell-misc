@@ -9,7 +9,8 @@
 --   * Assumes database "pinger_db", schema "pinger", table "pings" with columns:
 --       ts (timestamp[tz]) and latency_ms (real/double precision/numeric).
 --   * This script sets search_path to the "pinger" schema; adjust if needed.
---   * Mirrors the SQLite report: D1..D7 are calendar days (today=1), W1 is last 7 days.
+--   * Mirrors the SQLite report: D1..D7 are calendar days (today=1),
+--     W1..W4 are rolling weeks, M1 is last 30 days.
 SET search_path TO pinger;
 WITH RECURSIVE params AS (
     -- consider a gap > 2s as a loss
@@ -21,7 +22,7 @@ label AS (
     FROM params
 ),
 -- ----------------------------
--- Periods (idx = 1..7 per-day, idx = 8 weekly)
+-- Periods (idx = 1..7 per-day, idx = 8..11 weekly, idx = 12 monthly)
 -- ----------------------------
 days AS (
     SELECT 0 AS d
@@ -30,6 +31,13 @@ days AS (
     FROM days
     WHERE d < 6
 ),
+weeks AS (
+    SELECT 0 AS w
+    UNION ALL
+    SELECT w + 1
+    FROM weeks
+    WHERE w < 3
+),
 periods AS (
     -- Per-day windows: idx = 1..7 (today=1, yesterday=2, ...)
     SELECT (d + 1) AS idx,
@@ -37,9 +45,15 @@ periods AS (
         date_trunc('day', now()) - (d || ' days')::interval + interval '1 day' AS end_ts
     FROM days
     UNION ALL
-    -- Weekly window: idx = 8 (last 7 calendar days, midnight-aligned)
-    SELECT 8 AS idx,
-        date_trunc('day', now()) - interval '6 days' AS start_ts,
+    -- Weekly windows: idx = 8..11 (W1..W4, midnight-aligned)
+    SELECT (w + 8) AS idx,
+        date_trunc('day', now()) - ((w * 7 + 6) * interval '1 day') AS start_ts,
+        date_trunc('day', now()) + ((1 - w * 7) * interval '1 day') AS end_ts
+    FROM weeks
+    UNION ALL
+    -- Monthly window: idx = 12 (last 30 days, midnight-aligned)
+    SELECT 12 AS idx,
+        date_trunc('day', now()) - interval '29 days' AS start_ts,
         date_trunc('day', now()) + interval '1 day' AS end_ts
 ),
 -- ----------------------------
@@ -383,7 +397,7 @@ kv AS (
         med_cluster_span_sec
     FROM cluster_medians
 ) -- ----------------------------
--- Final pivot: D1..D7 (days), W1 (weekly)
+-- Final pivot: D1..D7 (days), W1..W4 (weeks), M1 (month)
 -- Integers rendered without decimals; others with 3 decimals
 -- ----------------------------
 SELECT metric,
@@ -618,7 +632,123 @@ SELECT metric,
             )::numeric,
             'FM999999990.000'
         )
-    END AS W1
+    END AS W1,
+    CASE
+        WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
+            'Loss events',
+            'Observed samples',
+            clusters_label,
+            'Median cluster loss (s)',
+            'Median cluster span (s)'
+        ) THEN CAST(
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 9 THEN val
+                    END
+                ),
+                0
+            ) AS INTEGER
+        )
+        ELSE to_char(
+            MAX(
+                CASE
+                    WHEN idx = 9 THEN val
+                END
+            )::numeric,
+            'FM999999990.000'
+        )
+    END AS W2,
+    CASE
+        WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
+            'Loss events',
+            'Observed samples',
+            clusters_label,
+            'Median cluster loss (s)',
+            'Median cluster span (s)'
+        ) THEN CAST(
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 10 THEN val
+                    END
+                ),
+                0
+            ) AS INTEGER
+        )
+        ELSE to_char(
+            MAX(
+                CASE
+                    WHEN idx = 10 THEN val
+                END
+            )::numeric,
+            'FM999999990.000'
+        )
+    END AS W3,
+    CASE
+        WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
+            'Loss events',
+            'Observed samples',
+            clusters_label,
+            'Median cluster loss (s)',
+            'Median cluster span (s)'
+        ) THEN CAST(
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 11 THEN val
+                    END
+                ),
+                0
+            ) AS INTEGER
+        )
+        ELSE to_char(
+            MAX(
+                CASE
+                    WHEN idx = 11 THEN val
+                END
+            )::numeric,
+            'FM999999990.000'
+        )
+    END AS W4,
+    CASE
+        WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
+            'Loss events',
+            'Observed samples',
+            clusters_label,
+            'Median cluster loss (s)',
+            'Median cluster span (s)'
+        ) THEN CAST(
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 12 THEN val
+                    END
+                ),
+                0
+            ) AS INTEGER
+        )
+        ELSE to_char(
+            MAX(
+                CASE
+                    WHEN idx = 12 THEN val
+                END
+            )::numeric,
+            'FM999999990.000'
+        )
+    END AS M1
 FROM kv,
     label
 GROUP BY metric

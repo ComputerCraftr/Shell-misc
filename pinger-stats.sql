@@ -3,8 +3,8 @@
 -- Usage:
 --   sqlite3 /var/db/pinger/pings.db < pinger-stats.sql
 --
--- This script produces a daily (last 7 days) columnar summary with a final W1 column
--- for the combined last 7 days. It uses a single metric pipeline for all periods.
+-- This script produces a daily (last 7 days) columnar summary with W1..W4 weekly
+-- columns and an M1 last-30-days column. It uses a single metric pipeline for all periods.
 -- ----------------------------
 -- Parameters
 -- ----------------------------
@@ -18,7 +18,7 @@ label AS (
     FROM params
 ),
 -- ----------------------------
--- Periods (idx = 1..7 per-day, idx = 8 weekly)
+-- Periods (idx = 1..7 per-day, idx = 8..11 weekly, idx = 12 monthly)
 -- ----------------------------
 days AS (
     SELECT 0 AS d
@@ -26,6 +26,13 @@ days AS (
     SELECT d + 1
     FROM days
     WHERE d < 6
+),
+weeks AS (
+    SELECT 0 AS w
+    UNION ALL
+    SELECT w + 1
+    FROM weeks
+    WHERE w < 3
 ),
 periods AS (
     -- Per-day windows: idx = 1..7 (today=1, yesterday=2, ...)
@@ -49,10 +56,37 @@ periods AS (
         ) AS end_sec
     FROM days
     UNION ALL
-    -- Weekly window: idx = 8 (last 7 calendar days, midnight-aligned)
-    SELECT 8 AS idx,
+    -- Weekly windows: idx = 8..11 (W1..W4, midnight-aligned)
+    SELECT (w + 8) AS idx,
         CAST(
-            strftime('%s', datetime('now', 'start of day', '-6 days')) AS INTEGER
+            strftime(
+                '%s',
+                datetime(
+                    'now',
+                    'start of day',
+                    printf('-%d days', w * 7 + 6)
+                )
+            ) AS INTEGER
+        ) AS start_sec,
+        CAST(
+            strftime(
+                '%s',
+                datetime(
+                    'now',
+                    'start of day',
+                    printf('%+d days', 1 - w * 7)
+                )
+            ) AS INTEGER
+        ) AS end_sec
+    FROM weeks
+    UNION ALL
+    -- Monthly window: idx = 12 (last 30 days, midnight-aligned)
+    SELECT 12 AS idx,
+        CAST(
+            strftime(
+                '%s',
+                datetime('now', 'start of day', '-29 days')
+            ) AS INTEGER
         ) AS start_sec,
         CAST(
             strftime('%s', datetime('now', 'start of day', '+1 day')) AS INTEGER
@@ -396,7 +430,7 @@ kv AS (
         med_cluster_span_sec
     FROM cluster_medians
 ) -- ----------------------------
--- Final pivot: D1..D7 (days), W1 (weekly)
+-- Final pivot: D1..D7 (days), W1..W4 (weeks), M1 (month)
 -- Integers rendered without decimals; others with 3 decimals
 -- ----------------------------
 SELECT metric,
@@ -631,7 +665,123 @@ SELECT metric,
                 END
             )
         )
-    END AS W1
+    END AS W1,
+    CASE
+        WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
+            'Loss events',
+            'Observed samples',
+            clusters_label,
+            'Median cluster loss (s)',
+            'Median cluster span (s)'
+        ) THEN CAST(
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 9 THEN val
+                    END
+                ),
+                0
+            ) AS INTEGER
+        )
+        ELSE printf(
+            '%.3f',
+            MAX(
+                CASE
+                    WHEN idx = 9 THEN val
+                END
+            )
+        )
+    END AS W2,
+    CASE
+        WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
+            'Loss events',
+            'Observed samples',
+            clusters_label,
+            'Median cluster loss (s)',
+            'Median cluster span (s)'
+        ) THEN CAST(
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 10 THEN val
+                    END
+                ),
+                0
+            ) AS INTEGER
+        )
+        ELSE printf(
+            '%.3f',
+            MAX(
+                CASE
+                    WHEN idx = 10 THEN val
+                END
+            )
+        )
+    END AS W3,
+    CASE
+        WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
+            'Loss events',
+            'Observed samples',
+            clusters_label,
+            'Median cluster loss (s)',
+            'Median cluster span (s)'
+        ) THEN CAST(
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 11 THEN val
+                    END
+                ),
+                0
+            ) AS INTEGER
+        )
+        ELSE printf(
+            '%.3f',
+            MAX(
+                CASE
+                    WHEN idx = 11 THEN val
+                END
+            )
+        )
+    END AS W4,
+    CASE
+        WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
+            'Loss events',
+            'Observed samples',
+            clusters_label,
+            'Median cluster loss (s)',
+            'Median cluster span (s)'
+        ) THEN CAST(
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 12 THEN val
+                    END
+                ),
+                0
+            ) AS INTEGER
+        )
+        ELSE printf(
+            '%.3f',
+            MAX(
+                CASE
+                    WHEN idx = 12 THEN val
+                END
+            )
+        )
+    END AS M1
 FROM kv,
     label
 GROUP BY metric
