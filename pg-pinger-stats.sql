@@ -205,7 +205,7 @@ loss_events AS (
 ),
 observed AS (
     SELECT idx,
-        COUNT(*) AS observed_samples
+        COUNT(*) AS sample_count
     FROM samples
     GROUP BY idx
 ),
@@ -213,8 +213,8 @@ loss_percent AS (
     -- Event-based percent: events / (observed + events)
     SELECT o.idx,
         CASE
-            WHEN (o.observed_samples + COALESCE(e.loss_events, 0)) = 0 THEN 0.0
-            ELSE 100.0 * COALESCE(e.loss_events, 0) / (o.observed_samples + COALESCE(e.loss_events, 0))
+            WHEN (o.sample_count + COALESCE(e.loss_events, 0)) = 0 THEN 0.0
+            ELSE 100.0 * COALESCE(e.loss_events, 0) / (o.sample_count + COALESCE(e.loss_events, 0))
         END AS loss_percent
     FROM observed o
         LEFT JOIN loss_events e USING (idx)
@@ -366,15 +366,15 @@ kv AS (
         mode_count
     FROM value_counts
     UNION ALL
+    SELECT 'Sample count',
+        idx,
+        sample_count
+    FROM observed
+    UNION ALL
     SELECT 'Loss events',
         idx,
         loss_events
     FROM loss_events
-    UNION ALL
-    SELECT 'Observed samples',
-        idx,
-        observed_samples
-    FROM observed
     UNION ALL
     SELECT 'Loss percent (%)',
         idx,
@@ -406,8 +406,8 @@ SELECT metric,
             'Mean count',
             'Median count',
             'Mode count',
+            'Sample count',
             'Loss events',
-            'Observed samples',
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
@@ -435,8 +435,8 @@ SELECT metric,
             'Mean count',
             'Median count',
             'Mode count',
+            'Sample count',
             'Loss events',
-            'Observed samples',
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
@@ -464,8 +464,8 @@ SELECT metric,
             'Mean count',
             'Median count',
             'Mode count',
+            'Sample count',
             'Loss events',
-            'Observed samples',
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
@@ -493,8 +493,8 @@ SELECT metric,
             'Mean count',
             'Median count',
             'Mode count',
+            'Sample count',
             'Loss events',
-            'Observed samples',
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
@@ -522,8 +522,8 @@ SELECT metric,
             'Mean count',
             'Median count',
             'Mode count',
+            'Sample count',
             'Loss events',
-            'Observed samples',
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
@@ -551,8 +551,8 @@ SELECT metric,
             'Mean count',
             'Median count',
             'Mode count',
+            'Sample count',
             'Loss events',
-            'Observed samples',
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
@@ -580,8 +580,8 @@ SELECT metric,
             'Mean count',
             'Median count',
             'Mode count',
+            'Sample count',
             'Loss events',
-            'Observed samples',
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
@@ -609,8 +609,8 @@ SELECT metric,
             'Mean count',
             'Median count',
             'Mode count',
+            'Sample count',
             'Loss events',
-            'Observed samples',
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
@@ -638,8 +638,8 @@ SELECT metric,
             'Mean count',
             'Median count',
             'Mode count',
+            'Sample count',
             'Loss events',
-            'Observed samples',
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
@@ -667,8 +667,8 @@ SELECT metric,
             'Mean count',
             'Median count',
             'Mode count',
+            'Sample count',
             'Loss events',
-            'Observed samples',
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
@@ -696,8 +696,8 @@ SELECT metric,
             'Mean count',
             'Median count',
             'Mode count',
+            'Sample count',
             'Loss events',
-            'Observed samples',
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
@@ -725,8 +725,8 @@ SELECT metric,
             'Mean count',
             'Median count',
             'Mode count',
+            'Sample count',
             'Loss events',
-            'Observed samples',
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
@@ -765,8 +765,8 @@ ORDER BY CASE
         WHEN 'Mean count' THEN 9
         WHEN 'Median count' THEN 10
         WHEN 'Mode count' THEN 11
-        WHEN 'Loss events' THEN 12
-        WHEN 'Observed samples' THEN 13
+        WHEN 'Sample count' THEN 12
+        WHEN 'Loss events' THEN 13
         WHEN 'Loss percent (%)' THEN 14
         WHEN clusters_label THEN 15
         WHEN 'Median cluster loss (s)' THEN 16
