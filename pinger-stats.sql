@@ -3,7 +3,7 @@
 -- Usage:
 --   sqlite3 /var/db/pinger/pings.db < pinger-stats.sql
 --
--- This script produces a daily (last 7 days) columnar summary with a final W7 column
+-- This script produces a daily (last 7 days) columnar summary with a final W1 column
 -- for the combined last 7 days. It uses a single metric pipeline for all periods.
 -- ----------------------------
 -- Parameters
@@ -329,7 +329,7 @@ kv AS (
         med_cluster_span_sec
     FROM cluster_medians
 ) -- ----------------------------
--- Final pivot: D1..D7 (days), W7 (weekly)
+-- Final pivot: D1..D7 (days), W1 (weekly)
 -- Integers rendered without decimals; others with 3 decimals
 -- ----------------------------
 SELECT metric,
@@ -540,7 +540,7 @@ SELECT metric,
                 END
             )
         )
-    END AS W7
+    END AS W1
 FROM kv,
     label
 GROUP BY metric
