@@ -112,6 +112,53 @@ percentiles AS (
     FROM ordered o
     GROUP BY o.idx
 ),
+rounded AS (
+    SELECT idx,
+        rtt,
+        CAST(ROUND(rtt) AS INTEGER) AS rtt_ms
+    FROM samples
+),
+mode_calc AS (
+    SELECT idx,
+        rtt_ms,
+        COUNT(*) AS cnt,
+        ROW_NUMBER() OVER (
+            PARTITION BY idx
+            ORDER BY COUNT(*) DESC,
+                rtt_ms DESC
+        ) AS rn
+    FROM rounded
+    GROUP BY idx,
+        rtt_ms
+),
+mode AS (
+    SELECT idx,
+        rtt_ms AS mode_ms,
+        cnt AS mode_count
+    FROM mode_calc
+    WHERE rn = 1
+),
+value_counts AS (
+    SELECT r.idx,
+        SUM(
+            CASE
+                WHEN r.rtt_ms = CAST(ROUND(b.avg_rtt) AS INTEGER) THEN 1
+                ELSE 0
+            END
+        ) AS mean_count,
+        SUM(
+            CASE
+                WHEN r.rtt_ms = CAST(ROUND(p.p50) AS INTEGER) THEN 1
+                ELSE 0
+            END
+        ) AS median_count,
+        MAX(m.mode_count) AS mode_count
+    FROM rounded r
+        JOIN basic b USING (idx)
+        JOIN percentiles p USING (idx)
+        LEFT JOIN mode m USING (idx)
+    GROUP BY r.idx
+),
 -- ----------------------------
 -- Diffs, jitter, loss, outages, clusters (per idx)
 -- ----------------------------
@@ -273,7 +320,7 @@ kv AS (
         max_rtt
     FROM basic
     UNION ALL
-    SELECT 'Average (ms)',
+    SELECT 'Mean (ms)',
         idx,
         avg_rtt
     FROM basic
@@ -282,6 +329,11 @@ kv AS (
         idx,
         p50
     FROM percentiles
+    UNION ALL
+    SELECT 'Mode (ms)',
+        idx,
+        mode_ms
+    FROM mode
     UNION ALL
     SELECT '1st percentile (ms)',
         idx,
@@ -297,6 +349,21 @@ kv AS (
         idx,
         jitter_ms
     FROM jitter
+    UNION ALL
+    SELECT 'Mean count',
+        idx,
+        mean_count
+    FROM value_counts
+    UNION ALL
+    SELECT 'Median count',
+        idx,
+        median_count
+    FROM value_counts
+    UNION ALL
+    SELECT 'Mode count',
+        idx,
+        mode_count
+    FROM value_counts
     UNION ALL
     SELECT 'Loss events',
         idx,
@@ -335,6 +402,9 @@ kv AS (
 SELECT metric,
     CASE
         WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
             'Loss events',
             'Observed samples',
             clusters_label,
@@ -361,6 +431,9 @@ SELECT metric,
     END AS D1,
     CASE
         WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
             'Loss events',
             'Observed samples',
             clusters_label,
@@ -387,6 +460,9 @@ SELECT metric,
     END AS D2,
     CASE
         WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
             'Loss events',
             'Observed samples',
             clusters_label,
@@ -413,6 +489,9 @@ SELECT metric,
     END AS D3,
     CASE
         WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
             'Loss events',
             'Observed samples',
             clusters_label,
@@ -439,6 +518,9 @@ SELECT metric,
     END AS D4,
     CASE
         WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
             'Loss events',
             'Observed samples',
             clusters_label,
@@ -465,6 +547,9 @@ SELECT metric,
     END AS D5,
     CASE
         WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
             'Loss events',
             'Observed samples',
             clusters_label,
@@ -491,6 +576,9 @@ SELECT metric,
     END AS D6,
     CASE
         WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
             'Loss events',
             'Observed samples',
             clusters_label,
@@ -517,6 +605,9 @@ SELECT metric,
     END AS D7,
     CASE
         WHEN metric IN (
+            'Mean count',
+            'Median count',
+            'Mode count',
             'Loss events',
             'Observed samples',
             clusters_label,
@@ -548,16 +639,20 @@ ORDER BY CASE
         metric
         WHEN 'Minimum (ms)' THEN 1
         WHEN 'Maximum (ms)' THEN 2
-        WHEN 'Average (ms)' THEN 3
+        WHEN 'Mean (ms)' THEN 3
         WHEN 'Median (ms)' THEN 4
-        WHEN '1st percentile (ms)' THEN 5
-        WHEN '99th percentile (ms)' THEN 6
-        WHEN 'Jitter (ms)' THEN 7
-        WHEN 'Loss events' THEN 8
-        WHEN 'Observed samples' THEN 9
-        WHEN 'Loss percent (%)' THEN 10
-        WHEN clusters_label THEN 11
-        WHEN 'Median cluster loss (s)' THEN 12
-        WHEN 'Median cluster span (s)' THEN 13
+        WHEN 'Mode (ms)' THEN 5
+        WHEN '1st percentile (ms)' THEN 6
+        WHEN '99th percentile (ms)' THEN 7
+        WHEN 'Jitter (ms)' THEN 8
+        WHEN 'Mean count' THEN 9
+        WHEN 'Median count' THEN 10
+        WHEN 'Mode count' THEN 11
+        WHEN 'Loss events' THEN 12
+        WHEN 'Observed samples' THEN 13
+        WHEN 'Loss percent (%)' THEN 14
+        WHEN clusters_label THEN 15
+        WHEN 'Median cluster loss (s)' THEN 16
+        WHEN 'Median cluster span (s)' THEN 17
         ELSE 99
     END;
