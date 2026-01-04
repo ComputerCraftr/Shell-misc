@@ -6,14 +6,20 @@
 # Service account: pinger
 #
 # Prerequisites (run once as root):
-#   pw useradd -n pinger -c "pinger service" -s /usr/sbin/nologin -d /nonexistent -w no
-#   mkdir -p /var/db/pinger && chown -R pinger:pinger /var/db/pinger
-#   mkdir -p /etc/sv/pinger/env && chmod -R 755 /etc/sv/pinger && \
-#     echo "RING_BUFFER_DAYS=7" | tee -a /etc/sv/pinger/env/.env.pinger && \
-#     echo "TARGET=2001:470:20::2" | tee -a /etc/sv/pinger/env/.env.pinger && \
-#     echo "DB_TYPE=sqlite" | tee -a /etc/sv/pinger/env/.env.pinger && \
-#   chmod -R o= /etc/sv/pinger/env && chown -R root:pinger /etc/sv/pinger
-#   # If using PostgreSQL, also set PGHOST, PGPORT, PGDATABASE, PGUSER in env/
+#   pw groupadd -n pinger || true
+#   pw useradd -n pinger -g pinger -c "pinger service" -s /usr/sbin/nologin -d /nonexistent -w no || true
+#   install -d -o pinger -g pinger /var/db/pinger
+#   install -d -o root -g pinger -m 755 /etc/sv/pinger/env
+#   cat > /etc/sv/pinger/env/.env.pinger <<'EOF'
+#   RING_BUFFER_DAYS=30
+#   TARGET=2001:470:20::2
+#   DB_TYPE=sqlite
+#   EOF
+#   chmod o= /etc/sv/pinger/env/.env.pinger
+#   chown -R root:pinger /etc/sv/pinger
+#
+# If using PostgreSQL, also set PGHOST, PGPORT, PGDATABASE, PGUSER in the .env file.
+# -------------------------------------------------------------
 # Enable service: ln -s /etc/sv/pinger /var/service/
 
 set -eu
@@ -29,7 +35,7 @@ ENV_DIR="$(dirname "$0")/env"
 [ -f "$ENV_DIR/.env.pinger" ] && . "$ENV_DIR/.env.pinger"
 
 # Defaults
-: "${RING_BUFFER_DAYS:=7}"
+: "${RING_BUFFER_DAYS:=30}"
 : "${TARGET:=2001:470:20::2}"
 : "${DB_TYPE:=sqlite}"
 : "${DB_FILE:=/var/db/pinger/pings.db}"
