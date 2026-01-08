@@ -66,11 +66,12 @@ while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
     DEFAULT_IF_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $4; exit}')
     # For IPv6, extract the default gateway from netstat (ignoring link-local).
     DEFAULT_GW_IPV6=$(netstat -rn -f inet6 2>/dev/null | awk '$1 == "default" {print $2; exit}')
-    if [ -n "$DEFAULT_GW_IPV4" ]; then
-        break
+    if [ -z "$DEFAULT_GW_IPV4" ]; then
+        sleep "$INTERVAL"
+        SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
+        continue
     fi
-    sleep "$INTERVAL"
-    SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
+    break
 done
 
 if [ -z "$DEFAULT_GW_IPV4" ]; then
@@ -79,11 +80,9 @@ if [ -z "$DEFAULT_GW_IPV4" ]; then
 fi
 
 # Build the default gateway information string.
-if [ -n "$DEFAULT_GW_IPV4" ] || [ -n "$DEFAULT_GW_IPV6" ]; then
-    DISCORD_MESSAGE="${DISCORD_MESSAGE}\`${DEFAULT_IF_IPV4}\` Discovered default gateway(s):"
-    [ -n "$DEFAULT_GW_IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV4\`\`\`"
-    [ -n "$DEFAULT_GW_IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV6\`\`\`"
-fi
+DISCORD_MESSAGE="${DISCORD_MESSAGE}\`${DEFAULT_IF_IPV4}\` Discovered default gateway(s):"
+[ -n "$DEFAULT_GW_IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV4\`\`\`"
+[ -n "$DEFAULT_GW_IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV6\`\`\`"
 
 # Poll for an IPv4 address on the tunnel interface.
 SECONDS_WAITED=0
@@ -92,12 +91,13 @@ TUN_IPV4=""
 while [ "$SECONDS_WAITED" -lt "$IP_TIMEOUT" ]; do
     if ifconfig "$TUN_IF" >/dev/null 2>&1; then
         TUN_IPV4=$(ifconfig "$TUN_IF" | awk '/inet / {print $2; exit}')
-        if [ -n "$TUN_IPV4" ]; then
-            break
-        fi
     fi
-    sleep "$INTERVAL"
-    SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
+    if [ -z "$TUN_IPV4" ]; then
+        sleep "$INTERVAL"
+        SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
+        continue
+    fi
+    break
 done
 
 if [ -z "$TUN_IPV4" ]; then

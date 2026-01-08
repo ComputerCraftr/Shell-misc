@@ -30,9 +30,15 @@ EXT_IF_CUR=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $4; e
 # Build a newline-separated list of candidates, filtering out the current default.
 CANDIDATE_LINES=$(echo "$EXT_IF_LIST" | tr ',' '\n' | grep -Fvx "$EXT_IF_CUR")
 
-# Loop until we have a valid candidate or remove all items from the list.
+if [ -z "$CANDIDATE_LINES" ]; then
+    log_err "Error: No candidate interfaces available."
+    exit 1
+fi
+
+# Loop until we have a working gateway or run out of candidates.
 EXT_IF_NEW=""
 EXT_IF_AVAILABLE=0
+DEFAULT_GW_IPV4=""
 while [ -n "$CANDIDATE_LINES" ]; do
     # Pick a random index (1…NUM_CANDIDATES).
     RAND=$(od -An -N2 -tu2 /dev/urandom | tr -d ' ')
@@ -41,57 +47,59 @@ while [ -n "$CANDIDATE_LINES" ]; do
     # Grab exactly that line.
     EXT_IF_NEW=$(echo "$CANDIDATE_LINES" | sed -n "${INDEX}p")
 
+    remove_current() {
+        CANDIDATE_LINES=$(echo "$CANDIDATE_LINES" | sed "${INDEX}d")
+    }
+
     # Verify the specified interface exists.
     EXT_IF_AVAILABLE=$([ -n "$EXT_IF_NEW" ] && ifconfig "$EXT_IF_NEW" >/dev/null 2>&1 && echo 1 || echo 0)
-    if [ "$EXT_IF_AVAILABLE" -eq 1 ]; then
-        # Delete existing default routes for IPv4 and IPv6.
-        route -n delete -inet default || true
-        route -n delete -inet6 default || true
-
-        # Bring the interface up.
-        ifconfig "$EXT_IF_NEW" up
-
-        # Restart the DHCP client service on the interface.
-        service dhclient restart "$EXT_IF_NEW" || true
-
-        # Break out of the loop now that the interface is up.
-        break
+    if [ "$EXT_IF_AVAILABLE" -ne 1 ]; then
+        remove_current
+        continue
     fi
 
-    # Remove the selected line from the list.
-    CANDIDATE_LINES=$(echo "$CANDIDATE_LINES" | sed "${INDEX}d")
-done
+    # Delete existing default routes for IPv4 and IPv6.
+    route -n delete -inet default || true
+    route -n delete -inet6 default || true
 
-# Poll for default gateways for IPv4 (using netstat).
-SECONDS_WAITED=0
-DEFAULT_GW_IPV4=""
-
-if echo "$EXT_IF_NEW" | grep -q 'bce[0-2]'; then
-    # Configure the default gateway according to the environment.
-    DEFAULT_GW_IPV4="${EXT_GW_IPV4:-}"
-    if [ -n "$DEFAULT_GW_IPV4" ]; then
-        route -n add -inet default "$DEFAULT_GW_IPV4" || true
+    # Restart the DHCP client service on the interface.
+    if ! service dhclient restart "$EXT_IF_NEW"; then
+        log_err "DHCP restart failed on $EXT_IF_NEW; trying another interface."
+        remove_current
+        continue
     fi
-else
+
+    # Poll for default gateway on this interface.
+    SECONDS_WAITED=0
+
     while [ "$SECONDS_WAITED" -lt "$GATEWAY_TIMEOUT" ]; do
-        # For IPv4, extract the default gateway from netstat.
-        DEFAULT_GW_IPV4=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $2; exit}')
-        if [ -n "$DEFAULT_GW_IPV4" ]; then
-            break
+        DEFAULT_GW_IPV4=$(netstat -rn -f inet 2>/dev/null | awk -v iface="$EXT_IF_NEW" '$1 == "default" && $4 == iface {print $2; exit}')
+        if [ -z "$DEFAULT_GW_IPV4" ]; then
+            sleep "$INTERVAL"
+            SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
+            continue
         fi
-        sleep "$INTERVAL"
-        SECONDS_WAITED=$((SECONDS_WAITED + INTERVAL))
+        break
     done
 
     if [ -z "$DEFAULT_GW_IPV4" ]; then
-        log_err "Error: Failed to discover a default gateway after $GATEWAY_TIMEOUT seconds."
-        false
+        log_err "Failed to obtain DHCP default gateway on $EXT_IF_NEW; trying another interface."
+        remove_current
+        continue
     fi
 
-    if ! timeout 5 nc -z -4 "$DEFAULT_GW_IPV4" 5201 >/dev/null 2>&1; then
-        # Connect directly to the server.
-        OVPN_PROXY_PORT=0
-    fi
+    # Break out of the loop now that the interface is up.
+    break
+done
+
+if [ -z "$DEFAULT_GW_IPV4" ]; then
+    log_err "Error: Failed to discover a default gateway after trying all interfaces."
+    exit 1
+fi
+
+if ! timeout 5 nc -z -4 "$DEFAULT_GW_IPV4" 5201 >/dev/null 2>&1; then
+    # Connect directly to the server.
+    OVPN_PROXY_PORT=0
 fi
 
 # Update the OpenVPN configuration.
@@ -102,8 +110,7 @@ if [ "$EXT_IF_AVAILABLE" -eq 1 ] && [ -f "${OVPN_PROXY_AUTH:-}" ] &&
         -e "s|__PROXY_AUTH_FILE__|$OVPN_PROXY_AUTH|" \
         "$OVPN_TEMPLATE" >"$OVPN_FILE"
 else
-    sed -E -e "s|^proto [a-z]+$|proto udp|" \
-        -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
+    sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
         -e "/__PROXY_STRING__/d" \
         -e "/__PROXY_AUTH_FILE__/d" \
         "$OVPN_TEMPLATE" >"$OVPN_FILE"
