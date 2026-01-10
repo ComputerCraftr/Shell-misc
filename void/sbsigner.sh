@@ -18,6 +18,19 @@ require_root() {
     fi
 }
 
+is_mounted() {
+    path="$1"
+    if command -v mountpoint >/dev/null 2>&1; then
+        mountpoint -q "$path"
+        return $?
+    fi
+    if [ -r /proc/self/mounts ]; then
+        awk -v p="$path" '$2 == p {found=1} END{exit found?0:1}' /proc/self/mounts
+        return $?
+    fi
+    mount | awk -v p="$path" '$3 == p {found=1} END{exit found?0:1}'
+}
+
 update_sbsigntool() {
     echo "[+] Updating sbsigntool..."
 
@@ -36,17 +49,31 @@ update_sbsigntool() {
 mount_keystore() {
     echo "[+] Opening LUKS and mounting keystore..."
     mkdir -p "$MNT_BASE" "$MNT_SBCTL"
+
     if [ ! -e "$KEY_DEV" ]; then
         cryptsetup open "$LUKS_DEV" luks_keystore || die "Failed to open LUKS"
     fi
-    mount "$KEY_DEV" "$MNT_BASE" || die "Failed to mount keystore"
-    mount -o ro --bind "$MNT_BASE/secureboot" "$MNT_SBCTL" || die "Failed to mount sbctl keys"
+
+    if ! is_mounted "$MNT_BASE"; then
+        mount "$KEY_DEV" "$MNT_BASE" || die "Failed to mount keystore"
+    fi
+
+    if ! is_mounted "$MNT_SBCTL"; then
+        mount -o ro --bind "$MNT_BASE/secureboot" "$MNT_SBCTL" || die "Failed to mount sbctl keys"
+    fi
 }
 
 unmount_keystore() {
-    echo "[+] Unmounting all mounts tied to LUKS device..."
-    umount -AR "$KEY_DEV" || echo "[!] Some mounts may have already been unmounted"
-    cryptsetup close luks_keystore || echo "[!] luks_keystore already closed or not mapped"
+    echo "[+] Unmounting keystore and bind mounts..."
+    if is_mounted "$MNT_SBCTL"; then
+        umount "$MNT_SBCTL" || echo "[!] Failed to unmount $MNT_SBCTL"
+    fi
+    if is_mounted "$MNT_BASE"; then
+        umount "$MNT_BASE" || echo "[!] Failed to unmount $MNT_BASE"
+    fi
+    if [ -e "$KEY_DEV" ]; then
+        cryptsetup close luks_keystore || echo "[!] luks_keystore already closed or not mapped"
+    fi
 }
 
 find_sb_keys() {
