@@ -2,10 +2,10 @@
 set -eu
 
 # CONFIGURATION
-KEY_DEV="/dev/mapper/luks_keystore"
-LUKS_DEV="/dev/nvme1n1p2" # Adjust if different
-MNT_BASE="/mnt/keystore"
-MNT_SBCTL="/var/lib/sbctl/keys"
+: "${KEY_DEV:=/dev/mapper/luks_keystore}"
+: "${LUKS_DEV:=/dev/nvme1n1p2}" # Adjust if different
+: "${MNT_BASE:=/mnt/keystore}"
+: "${MNT_SBCTL:=/var/lib/sbctl/keys}"
 
 die() {
     echo "Error: $1" >&2
@@ -18,15 +18,15 @@ require_root() {
     fi
 }
 
-update_sbctl() {
-    echo "[+] Updating sbctl..."
+update_sbsigntool() {
+    echo "[+] Updating sbsigntool..."
 
     # Check connectivity with ping
     if ping -c 1 -W 1 -q "google.com" >/dev/null 2>&1; then
         if command -v torsocks >/dev/null 2>&1; then
-            torsocks xbps-install -Sy sbctl || die "Failed to update sbctl via torsocks"
+            torsocks xbps-install -Syu sbsigntool || die "Failed to update sbsigntool via torsocks"
         else
-            xbps-install -Sy sbctl || die "Failed to update sbctl"
+            xbps-install -Syu sbsigntool || die "Failed to update sbsigntool"
         fi
     else
         echo "[!] No internet connection. Please check your network."
@@ -49,19 +49,33 @@ unmount_keystore() {
     cryptsetup close luks_keystore || echo "[!] luks_keystore already closed or not mapped"
 }
 
-run_sbctl_tasks() {
-    echo "[+] Running sbctl tasks..."
-    sbctl status
+find_sb_keys() {
+    : "${KEY_FILE:=${MNT_SBCTL}/db/db.key}"
+    : "${CERT_FILE:=${MNT_SBCTL}/db/db.pem}"
+
+    [ -f "$KEY_FILE" ] || die "Missing signing key: $KEY_FILE"
+    [ -f "$CERT_FILE" ] || die "Missing signing cert: $CERT_FILE"
+}
+
+sign_with_sbsigntool() {
+    echo "[+] Verifying and signing kernels with sbsigntool..."
 
     found=0
     for f in /boot/vmlinuz*; do
         [ -e "$f" ] || continue
-        sbctl verify "$f" || die "sbctl failed on $f"
+        if sbverify --list "$f" 2>&1 | grep -qF "No signature table present"; then
+            echo "[*] Signing: $f"
+            sbsign --key "$KEY_FILE" --cert "$CERT_FILE" --output "${f}.signed" "$f" || die "sbsign failed on $f"
+            mv "${f}.signed" "$f" || die "Failed to replace $f"
+            sbverify --list "$f" >/dev/null 2>&1 || die "sbverify failed after signing $f"
+        else
+            echo "[=] Already signed: $f"
+        fi
         found=1
     done
 
     if [ "$found" -eq 1 ]; then
-        echo "[✓] sbctl verification complete."
+        echo "[✓] sbsigntool verification complete."
     else
         echo "[!] No kernel images found in /boot to verify."
     fi
@@ -72,9 +86,10 @@ require_root
 
 case "${1:-}" in
 --mount)
-    update_sbctl
+    update_sbsigntool
     mount_keystore
-    run_sbctl_tasks
+    find_sb_keys
+    sign_with_sbsigntool
     ;;
 --unmount)
     unmount_keystore
