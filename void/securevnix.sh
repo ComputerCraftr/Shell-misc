@@ -13,11 +13,15 @@ run_as_user() {
     chpst -u "$RUN_USER" -- "$@"
 }
 
-if command -v torsocks >/dev/null 2>&1; then
-    torsocks xbps-install -Suy ufw nftables iptables-nft cryptsetup google-authenticator-libpam libqrencode spectre-meltdown-checker lynis linux-firmware socklog-void cronie chrony
-else
-    xbps-install -Suy ufw nftables iptables-nft cryptsetup google-authenticator-libpam libqrencode spectre-meltdown-checker lynis linux-firmware socklog-void cronie chrony
-fi
+xbps_install() {
+    if command -v torsocks >/dev/null 2>&1; then
+        torsocks xbps-install "$@"
+    else
+        xbps-install "$@"
+    fi
+}
+
+xbps_install -Suy ufw nftables iptables-nft cryptsetup google-authenticator-libpam libqrencode spectre-meltdown-checker lynis linux-firmware socklog-void cronie chrony
 xbps-alternatives -s iptables-nft
 
 ln -sf /etc/sv/ufw /var/service
@@ -34,29 +38,37 @@ ufw allow in from 10.1.0.0/16 to any port 5201
 ufw allow in from fe80::/10 to any port 22 proto tcp
 ufw allow in from fe80::/10 to any port 5201
 
-# Set kernel lockdown if it is not currently active
+ensure_kernel_lockdown() {
+    LOCKDOWN_BLOCK=$(
+        cat <<EOF
 if [ -r /sys/kernel/security/lockdown ] && grep -qF '[none]' /sys/kernel/security/lockdown 2>/dev/null; then
     echo integrity >/sys/kernel/security/lockdown 2>/dev/null || true
 fi
-if [ ! -f /etc/rc.local ]; then
-    tee /etc/rc.local <<EOF
+EOF
+    )
+
+    if [ ! -f /etc/rc.local ]; then
+        cat <<EOF >/etc/rc.local
 #!/bin/sh
 set -eu
-if [ -r /sys/kernel/security/lockdown ] && grep -qF '[none]' /sys/kernel/security/lockdown 2>/dev/null; then
-    echo integrity >/sys/kernel/security/lockdown 2>/dev/null || true
-fi
+$LOCKDOWN_BLOCK
 EOF
-    chmod +x /etc/rc.local
-fi
+        chmod +x /etc/rc.local
+        return
+    fi
 
-# Ensure kernel lockdown is set on every boot
-if ! grep -qF 'echo integrity >/sys/kernel/security/lockdown' /etc/rc.local; then
-    tee -a /etc/rc.local <<EOF
-if [ -r /sys/kernel/security/lockdown ] && grep -qF '[none]' /sys/kernel/security/lockdown 2>/dev/null; then
-    echo integrity >/sys/kernel/security/lockdown 2>/dev/null || true
-fi
-EOF
-fi
+    # Ensure kernel lockdown is set on every boot
+    if ! grep -qF 'echo integrity >/sys/kernel/security/lockdown' /etc/rc.local; then
+        printf '%s\n' "$LOCKDOWN_BLOCK" >>/etc/rc.local
+    fi
+
+    # Set kernel lockdown if it is not currently active
+    if [ -r /sys/kernel/security/lockdown ] && grep -qF '[none]' /sys/kernel/security/lockdown 2>/dev/null; then
+        echo integrity >/sys/kernel/security/lockdown 2>/dev/null || true
+    fi
+}
+
+ensure_kernel_lockdown
 
 run_as_user mkdir -p "$RUN_HOME/.ssh"
 run_as_user chmod 700 "$RUN_HOME/.ssh"
