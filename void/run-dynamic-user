@@ -83,12 +83,43 @@ else
     PERSIST_BASE="/var/db/runit-dynuser"
 fi
 
+DEFAULT_SYS_MIN=60001
+DEFAULT_SYS_MAX=64999
+SYS_UID_MIN="$DEFAULT_SYS_MIN"
+SYS_UID_MAX="$DEFAULT_SYS_MAX"
+SYS_GID_MIN="$DEFAULT_SYS_MIN"
+SYS_GID_MAX="$DEFAULT_SYS_MAX"
+
+if [ "$OS" = "Linux" ] && [ -r /etc/login.defs ]; then
+    sys_uid_min=$(awk '$1=="SYS_UID_MIN"{print $2; exit}' /etc/login.defs 2>/dev/null || true)
+    sys_uid_max=$(awk '$1=="SYS_UID_MAX"{print $2; exit}' /etc/login.defs 2>/dev/null || true)
+    sys_gid_min=$(awk '$1=="SYS_GID_MIN"{print $2; exit}' /etc/login.defs 2>/dev/null || true)
+    sys_gid_max=$(awk '$1=="SYS_GID_MAX"{print $2; exit}' /etc/login.defs 2>/dev/null || true)
+
+    case "$sys_uid_min" in
+    '' | *[!0-9]*) ;;
+    *) SYS_UID_MIN="$sys_uid_min" ;;
+    esac
+    case "$sys_uid_max" in
+    '' | *[!0-9]*) ;;
+    *) SYS_UID_MAX="$sys_uid_max" ;;
+    esac
+    case "$sys_gid_min" in
+    '' | *[!0-9]*) ;;
+    *) SYS_GID_MIN="$sys_gid_min" ;;
+    esac
+    case "$sys_gid_max" in
+    '' | *[!0-9]*) ;;
+    *) SYS_GID_MAX="$sys_gid_max" ;;
+    esac
+fi
+
 add_group() {
     name="$1"
     gid="$2"
     case "$OS" in
-    Linux) groupadd -g "$gid" "$name" ;;
-    FreeBSD) pw groupadd -n "$name" -g "$gid" ;;
+    Linux) groupadd -g "$gid" -r "$name" ;;
+    FreeBSD) pw groupadd -g "$gid" -n "$name" ;;
     esac
 }
 
@@ -102,7 +133,7 @@ add_user() {
         useradd -u "$uid" -g "$gid" -d "$home" -M -N -r -s /usr/sbin/nologin "$name"
         ;;
     FreeBSD)
-        pw useradd -n "$name" -u "$uid" -g "$gid" -d "$home" -w no -s /usr/sbin/nologin
+        pw useradd -u "$uid" -g "$gid" -d "$home" -w no -s /usr/sbin/nologin -n "$name"
         ;;
     esac
 }
@@ -111,7 +142,7 @@ del_user() {
     name="$1"
     case "$OS" in
     Linux) userdel -f "$name" ;;
-    FreeBSD) pw userdel -n "$name" -r ;;
+    FreeBSD) pw userdel -r -n "$name" ;;
     esac
 }
 
@@ -275,13 +306,27 @@ if [ -z "$USER" ] || [ -z "$GROUP" ]; then
     exit 1
 fi
 
-for id in $(seq 60000 64999); do
-    if ! getent passwd "$id" >/dev/null 2>&1 && ! getent group "$id" >/dev/null 2>&1; then
+for id in $(seq "$SYS_UID_MIN" "$SYS_UID_MAX"); do
+    if ! getent passwd "$id" >/dev/null 2>&1; then
         UID="$id"
-        GID="$id"
         break
     fi
 done
+
+if [ -n "$UID" ] && [ "$UID" -ge "$SYS_GID_MIN" ] && [ "$UID" -le "$SYS_GID_MAX" ]; then
+    if ! getent group "$UID" >/dev/null 2>&1; then
+        GID="$UID"
+    fi
+fi
+
+if [ -z "$GID" ]; then
+    for id in $(seq "$SYS_GID_MIN" "$SYS_GID_MAX"); do
+        if ! getent group "$id" >/dev/null 2>&1; then
+            GID="$id"
+            break
+        fi
+    done
+fi
 
 if [ -z "$UID" ] || [ -z "$GID" ]; then
     echo "No free UID/GID available." >&2
