@@ -118,11 +118,16 @@ case "${1:-}" in
     find_sb_keys
     sign_with_sbsigntool
     ;;
+--sign)
+    update_sbsigntool
+    find_sb_keys
+    sign_with_sbsigntool
+    ;;
 --unmount)
     unmount_keystore
     ;;
 *)
-    echo "Usage: $0 --mount | --unmount"
+    echo "Usage: $0 --mount | --sign | --unmount"
     exit 1
     ;;
 esac
