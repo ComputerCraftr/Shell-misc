@@ -45,9 +45,6 @@ ENV_DIR="$(dirname "$0")/env"
 : "${PGUSER:=pinger}"
 RING_BUFFER_SIZE=$((RING_BUFFER_DAYS * 86400))
 
-# Startup delay to ensure unique integer-second timestamps
-sleep 1
-
 # Common SQL templates
 INIT_SCHEMA_SQL=$(
     cat <<'EOS'
@@ -100,6 +97,9 @@ case "$last_slot" in
 '' | *[!0-9]*) slot=0 ;;                           # invalid
 *) slot=$(((last_slot + 1) % RING_BUFFER_SIZE)) ;; # wrap
 esac
+
+# Startup delay to ensure unique integer-second timestamps
+sleep 1
 
 # Main loop: keep a strict 1 Hz cadence aligned to wall-clock seconds
 while :; do
