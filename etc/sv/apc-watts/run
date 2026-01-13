@@ -1,0 +1,159 @@
+#!/bin/sh
+# runit service "apc-watts": log apcupsd watt draw to SQL
+# Supports SQLite file or PostgreSQL via Unix socket
+# -------------------------------------------------------------
+# Location: /etc/sv/apc-watts/run
+# Service account: apcwatts
+#
+# Prerequisites (run once as root):
+#   pw groupadd -n apcwatts || true
+#   pw useradd -n apcwatts -g apcwatts -c "apc watts service" -s /usr/sbin/nologin -d /nonexistent -w no || true
+#   install -d -o apcwatts -g apcwatts /var/db/apc-watts
+#   install -d -o root -g apcwatts -m 755 /etc/sv/apc-watts/env
+#   cat > /etc/sv/apc-watts/env/.env.apc-watts <<'EOF'
+#   RING_BUFFER_DAYS=30
+#   INTERVAL_SEC=1
+#   DB_TYPE=sqlite
+#   EOF
+#   chmod o= /etc/sv/apc-watts/env/.env.apc-watts
+#   chown -R root:apcwatts /etc/sv/apc-watts
+#
+# If using PostgreSQL, also set PGHOST, PGPORT, PGDATABASE, PGUSER in the .env file.
+# -------------------------------------------------------------
+# Enable service: ln -s /etc/sv/apc-watts /var/service/
+
+set -eu
+
+# Drop privileges if needed
+current_user=$(id -un)
+if [ "$current_user" != "apcwatts" ]; then
+    exec chpst -u apcwatts /bin/sh "$0" "$@"
+fi
+
+# Load environment
+ENV_DIR="$(dirname "$0")/env"
+[ -f "$ENV_DIR/.env.apc-watts" ] && . "$ENV_DIR/.env.apc-watts"
+
+# Defaults
+: "${RING_BUFFER_DAYS:=30}"
+: "${INTERVAL_SEC:=1}"
+: "${DB_TYPE:=sqlite}"
+: "${DB_FILE:=/var/db/apc-watts/apc-watts.db}"
+: "${PGHOST:=/tmp}"
+: "${PGPORT:=5432}"
+: "${PGDATABASE:=apc_watts_db}"
+: "${PGUSER:=apcwatts}"
+: "${APCACCESS_CMD:=apcaccess status}"
+
+case "$INTERVAL_SEC" in
+'' | *[!0-9]*)
+    echo "[apc-watts] ERROR: INTERVAL_SEC must be a positive integer." >&2
+    exit 1
+    ;;
+0)
+    echo "[apc-watts] ERROR: INTERVAL_SEC must be greater than zero." >&2
+    exit 1
+    ;;
+esac
+
+RING_BUFFER_SIZE=$((RING_BUFFER_DAYS * 86400 / INTERVAL_SEC))
+[ "$RING_BUFFER_SIZE" -ge 1 ] || RING_BUFFER_SIZE=1
+
+# Common SQL templates
+INIT_SCHEMA_SQL=$(
+    cat <<'EOS'
+-- SQLite or PostgreSQL schema initialization
+CREATE TABLE IF NOT EXISTS watts (
+    slot      INTEGER PRIMARY KEY,
+    ts        %TSTYPE% NOT NULL DEFAULT CURRENT_TIMESTAMP UNIQUE,
+    watts     REAL    NOT NULL,
+    loadpct   REAL    NOT NULL,
+    nompower  REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_watts_ts ON watts(ts);
+EOS
+)
+
+UPSERT_SQL=$(
+    cat <<'EOS'
+-- SQLite or PostgreSQL upsert
+INSERT INTO watts(slot, watts, loadpct, nompower) VALUES(
+    %SLOT%, %WATTS%, %LOADPCT%, %NOMPOWER%
+) ON CONFLICT(slot) DO UPDATE SET
+    ts       = CURRENT_TIMESTAMP,
+    watts    = EXCLUDED.watts,
+    loadpct  = EXCLUDED.loadpct,
+    nompower = EXCLUDED.nompower;
+EOS
+)
+
+SELECT_LAST_SLOT="SELECT slot FROM watts ORDER BY ts DESC LIMIT 1;"
+
+# Determine client command and schema substitutions
+case "$DB_TYPE" in
+sqlite)
+    SED_SCHEMA='s/%TSTYPE%/DATETIME/g'
+    CLIENT_CMD="sqlite3 '$DB_FILE'"
+    ;;
+postgres)
+    SED_SCHEMA='s/%TSTYPE%/TIMESTAMPTZ/g'
+    CLIENT_CMD="psql -qAt -h '$PGHOST' -p '$PGPORT' -U '$PGUSER' -d '$PGDATABASE'"
+    ;;
+*)
+    echo "[apc-watts] ERROR: unsupported DB_TYPE='$DB_TYPE'" >&2
+    exit 1
+    ;;
+esac
+
+# Initialize schema
+echo "$INIT_SCHEMA_SQL" | sed "$SED_SCHEMA" | eval "$CLIENT_CMD"
+
+# Determine starting slot
+last_slot=$(echo "$SELECT_LAST_SLOT" | eval "$CLIENT_CMD")
+case "$last_slot" in
+'' | *[!0-9]*) slot=0 ;;                           # invalid
+*) slot=$(((last_slot + 1) % RING_BUFFER_SIZE)) ;; # wrap
+esac
+
+# Startup delay to ensure unique integer-second timestamps
+sleep 1
+
+while :; do
+    # Wait until the scheduled next whole second
+    while :; do
+        now=$(date -u +%s)
+        [ "$now" -ge "${next_tick:-0}" ] && break
+        sleep 0.1
+    done
+    next_tick=$((now + INTERVAL_SEC))
+
+    STATUS=$($APCACCESS_CMD 2>/dev/null || true)
+    if [ -z "$STATUS" ]; then
+        echo "[apc-watts] WARN: apcaccess returned no output." >&2
+        continue
+    fi
+
+    LOADPCT=$(printf '%s\n' "$STATUS" | awk '/LOADPCT/ { gsub(/[%]/, "", $3); print $3; exit }')
+    NOMPOWER=$(printf '%s\n' "$STATUS" | awk '/NOMPOWER/ { print $3; exit }')
+
+    case "$LOADPCT" in
+    '' | *[!0-9.]*)
+        echo "[apc-watts] WARN: invalid LOADPCT='$LOADPCT'." >&2
+        continue
+        ;;
+    esac
+
+    case "$NOMPOWER" in
+    '' | *[!0-9.]*)
+        echo "[apc-watts] WARN: invalid NOMPOWER='$NOMPOWER'." >&2
+        continue
+        ;;
+    esac
+
+    WATTS=$(echo "$LOADPCT * $NOMPOWER / 100" | bc -l)
+
+    SQL=$(echo "$UPSERT_SQL" |
+        sed "s/%SLOT%/$slot/; s/%WATTS%/$WATTS/; s/%LOADPCT%/$LOADPCT/; s/%NOMPOWER%/$NOMPOWER/")
+    echo "$SQL" | eval "$CLIENT_CMD"
+    slot=$(((slot + 1) % RING_BUFFER_SIZE))
+done
