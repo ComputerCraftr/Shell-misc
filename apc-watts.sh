@@ -1,18 +1,9 @@
 #!/bin/sh
 set -eu
 
-# Get status output
-STATUS=$(apcaccess status 2>/dev/null || true)
-
-# Ensure non-empty output
-if [ -z "$STATUS" ]; then
-    echo "Error: apcaccess returned no output." >&2
-    exit 1
-fi
-
-# Extract values
-LOADPCT=$(printf '%s\n' "$STATUS" | awk '/LOADPCT/ { gsub(/[%]/, "", $3); print $3 }')
-NOMPOWER=$(printf '%s\n' "$STATUS" | awk '/NOMPOWER/ { print $3 }')
+# Extract values from status output
+LOADPCT=$(apcaccess -u -p LOADPCT 2>/dev/null || true)
+NOMPOWER=$(apcaccess -u -p NOMPOWER 2>/dev/null || true)
 
 # Validate values are numeric
 case "$LOADPCT" in

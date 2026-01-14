@@ -43,7 +43,8 @@ ENV_DIR="$(dirname "$0")/env"
 : "${PGPORT:=5432}"
 : "${PGDATABASE:=apc_watts_db}"
 : "${PGUSER:=apcwatts}"
-: "${APCACCESS_CMD:=apcaccess status}"
+: "${APCACCESS_BIN:=apcaccess}"
+: "${APCACCESS_ARGS:=}"
 
 case "$INTERVAL_SEC" in
 '' | *[!0-9]*)
@@ -67,8 +68,7 @@ CREATE TABLE IF NOT EXISTS watts (
     slot      INTEGER PRIMARY KEY,
     ts        %TSTYPE% NOT NULL DEFAULT CURRENT_TIMESTAMP UNIQUE,
     watts     REAL    NOT NULL,
-    loadpct   REAL    NOT NULL,
-    nompower  REAL    NOT NULL
+    loadpct   REAL    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_watts_ts ON watts(ts);
 EOS
@@ -77,13 +77,12 @@ EOS
 UPSERT_SQL=$(
     cat <<'EOS'
 -- SQLite or PostgreSQL upsert
-INSERT INTO watts(slot, watts, loadpct, nompower) VALUES(
-    %SLOT%, %WATTS%, %LOADPCT%, %NOMPOWER%
+INSERT INTO watts(slot, watts, loadpct) VALUES(
+    %SLOT%, %WATTS%, %LOADPCT%
 ) ON CONFLICT(slot) DO UPDATE SET
     ts       = CURRENT_TIMESTAMP,
     watts    = EXCLUDED.watts,
-    loadpct  = EXCLUDED.loadpct,
-    nompower = EXCLUDED.nompower;
+    loadpct  = EXCLUDED.loadpct;
 EOS
 )
 
@@ -115,8 +114,26 @@ case "$last_slot" in
 *) slot=$(((last_slot + 1) % RING_BUFFER_SIZE)) ;; # wrap
 esac
 
+apcaccess_value() {
+    eval "$APCACCESS_BIN $APCACCESS_ARGS -u -p $1"
+}
+
 # Startup delay to ensure unique integer-second timestamps
 sleep 1
+
+# Fetch NOMPOWER once (constant for the UPS)
+while :; do
+    NOMPOWER=$(apcaccess_value NOMPOWER 2>/dev/null || true)
+    case "$NOMPOWER" in
+    '' | *[!0-9.]*)
+        echo "[apc-watts] WARN: invalid NOMPOWER='$NOMPOWER'. Retrying..." >&2
+        sleep 5
+        ;;
+    *)
+        break
+        ;;
+    esac
+done
 
 while :; do
     # Wait until the scheduled next whole second
@@ -127,14 +144,7 @@ while :; do
     done
     next_tick=$((now + INTERVAL_SEC))
 
-    STATUS=$($APCACCESS_CMD 2>/dev/null || true)
-    if [ -z "$STATUS" ]; then
-        echo "[apc-watts] WARN: apcaccess returned no output." >&2
-        continue
-    fi
-
-    LOADPCT=$(printf '%s\n' "$STATUS" | awk '/LOADPCT/ { gsub(/[%]/, "", $3); print $3; exit }')
-    NOMPOWER=$(printf '%s\n' "$STATUS" | awk '/NOMPOWER/ { print $3; exit }')
+    LOADPCT=$(apcaccess_value LOADPCT 2>/dev/null || true)
 
     case "$LOADPCT" in
     '' | *[!0-9.]*)
@@ -143,17 +153,10 @@ while :; do
         ;;
     esac
 
-    case "$NOMPOWER" in
-    '' | *[!0-9.]*)
-        echo "[apc-watts] WARN: invalid NOMPOWER='$NOMPOWER'." >&2
-        continue
-        ;;
-    esac
-
     WATTS=$(echo "$LOADPCT * $NOMPOWER / 100" | bc -l)
 
     SQL=$(echo "$UPSERT_SQL" |
-        sed "s/%SLOT%/$slot/; s/%WATTS%/$WATTS/; s/%LOADPCT%/$LOADPCT/; s/%NOMPOWER%/$NOMPOWER/")
+        sed "s/%SLOT%/$slot/; s/%WATTS%/$WATTS/; s/%LOADPCT%/$LOADPCT/")
     echo "$SQL" | eval "$CLIENT_CMD"
     slot=$(((slot + 1) % RING_BUFFER_SIZE))
 done
