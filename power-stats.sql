@@ -1,16 +1,19 @@
 .mode column --
 -- power-stats.sql
 -- Usage:
---   sqlite3 /var/db/apc-watts/apc-watts.db < power-stats.sql
+--   sqlite3 /var/db/power-logger/power-logger.db < power-stats.sql
 --
 -- This script produces a daily (last 7 days) columnar summary with W1..W4 weekly
 -- columns and an M1 last-30-days column. It uses a single metric pipeline for all periods.
 -- ----------------------------
--- Periods (idx = 1..7 per-day, idx = 8..11 weekly, idx = 12 monthly)
+-- Parameters
 -- ----------------------------
 WITH RECURSIVE params AS (
     SELECT 600 AS off_gap_s
 ),
+-- ----------------------------
+-- Periods (idx = 1..7 per-day, idx = 8..11 weekly, idx = 12 monthly)
+-- ----------------------------
 days AS (
     SELECT 0 AS d
     UNION ALL
