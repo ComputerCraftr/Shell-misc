@@ -411,7 +411,7 @@ SELECT metric,
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
-        ) THEN CAST(
+        ) THEN to_char(
             COALESCE(
                 MAX(
                     CASE
@@ -419,13 +419,17 @@ SELECT metric,
                     END
                 ),
                 0
-            ) AS INTEGER
+            )::numeric,
+            'FM999999990'
         )
         ELSE to_char(
-            MAX(
-                CASE
-                    WHEN idx = 1 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 1 THEN val
+                    END
+                ),
+                0
             )::numeric,
             'FM999999990.000'
         )
@@ -440,7 +444,7 @@ SELECT metric,
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
-        ) THEN CAST(
+        ) THEN to_char(
             COALESCE(
                 MAX(
                     CASE
@@ -448,13 +452,17 @@ SELECT metric,
                     END
                 ),
                 0
-            ) AS INTEGER
+            )::numeric,
+            'FM999999990'
         )
         ELSE to_char(
-            MAX(
-                CASE
-                    WHEN idx = 2 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 2 THEN val
+                    END
+                ),
+                0
             )::numeric,
             'FM999999990.000'
         )
@@ -469,7 +477,7 @@ SELECT metric,
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
-        ) THEN CAST(
+        ) THEN to_char(
             COALESCE(
                 MAX(
                     CASE
@@ -477,13 +485,17 @@ SELECT metric,
                     END
                 ),
                 0
-            ) AS INTEGER
+            )::numeric,
+            'FM999999990'
         )
         ELSE to_char(
-            MAX(
-                CASE
-                    WHEN idx = 3 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 3 THEN val
+                    END
+                ),
+                0
             )::numeric,
             'FM999999990.000'
         )
@@ -498,7 +510,7 @@ SELECT metric,
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
-        ) THEN CAST(
+        ) THEN to_char(
             COALESCE(
                 MAX(
                     CASE
@@ -506,13 +518,17 @@ SELECT metric,
                     END
                 ),
                 0
-            ) AS INTEGER
+            )::numeric,
+            'FM999999990'
         )
         ELSE to_char(
-            MAX(
-                CASE
-                    WHEN idx = 4 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 4 THEN val
+                    END
+                ),
+                0
             )::numeric,
             'FM999999990.000'
         )
@@ -527,7 +543,7 @@ SELECT metric,
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
-        ) THEN CAST(
+        ) THEN to_char(
             COALESCE(
                 MAX(
                     CASE
@@ -535,13 +551,17 @@ SELECT metric,
                     END
                 ),
                 0
-            ) AS INTEGER
+            )::numeric,
+            'FM999999990'
         )
         ELSE to_char(
-            MAX(
-                CASE
-                    WHEN idx = 5 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 5 THEN val
+                    END
+                ),
+                0
             )::numeric,
             'FM999999990.000'
         )
@@ -556,7 +576,7 @@ SELECT metric,
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
-        ) THEN CAST(
+        ) THEN to_char(
             COALESCE(
                 MAX(
                     CASE
@@ -564,13 +584,17 @@ SELECT metric,
                     END
                 ),
                 0
-            ) AS INTEGER
+            )::numeric,
+            'FM999999990'
         )
         ELSE to_char(
-            MAX(
-                CASE
-                    WHEN idx = 6 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 6 THEN val
+                    END
+                ),
+                0
             )::numeric,
             'FM999999990.000'
         )
@@ -585,7 +609,7 @@ SELECT metric,
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
-        ) THEN CAST(
+        ) THEN to_char(
             COALESCE(
                 MAX(
                     CASE
@@ -593,13 +617,17 @@ SELECT metric,
                     END
                 ),
                 0
-            ) AS INTEGER
+            )::numeric,
+            'FM999999990'
         )
         ELSE to_char(
-            MAX(
-                CASE
-                    WHEN idx = 7 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 7 THEN val
+                    END
+                ),
+                0
             )::numeric,
             'FM999999990.000'
         )
@@ -614,7 +642,7 @@ SELECT metric,
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
-        ) THEN CAST(
+        ) THEN to_char(
             COALESCE(
                 MAX(
                     CASE
@@ -622,13 +650,17 @@ SELECT metric,
                     END
                 ),
                 0
-            ) AS INTEGER
+            )::numeric,
+            'FM999999990'
         )
         ELSE to_char(
-            MAX(
-                CASE
-                    WHEN idx = 8 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 8 THEN val
+                    END
+                ),
+                0
             )::numeric,
             'FM999999990.000'
         )
@@ -643,7 +675,7 @@ SELECT metric,
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
-        ) THEN CAST(
+        ) THEN to_char(
             COALESCE(
                 MAX(
                     CASE
@@ -651,13 +683,17 @@ SELECT metric,
                     END
                 ),
                 0
-            ) AS INTEGER
+            )::numeric,
+            'FM999999990'
         )
         ELSE to_char(
-            MAX(
-                CASE
-                    WHEN idx = 9 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 9 THEN val
+                    END
+                ),
+                0
             )::numeric,
             'FM999999990.000'
         )
@@ -672,7 +708,7 @@ SELECT metric,
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
-        ) THEN CAST(
+        ) THEN to_char(
             COALESCE(
                 MAX(
                     CASE
@@ -680,13 +716,17 @@ SELECT metric,
                     END
                 ),
                 0
-            ) AS INTEGER
+            )::numeric,
+            'FM999999990'
         )
         ELSE to_char(
-            MAX(
-                CASE
-                    WHEN idx = 10 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 10 THEN val
+                    END
+                ),
+                0
             )::numeric,
             'FM999999990.000'
         )
@@ -701,7 +741,7 @@ SELECT metric,
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
-        ) THEN CAST(
+        ) THEN to_char(
             COALESCE(
                 MAX(
                     CASE
@@ -709,13 +749,17 @@ SELECT metric,
                     END
                 ),
                 0
-            ) AS INTEGER
+            )::numeric,
+            'FM999999990'
         )
         ELSE to_char(
-            MAX(
-                CASE
-                    WHEN idx = 11 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 11 THEN val
+                    END
+                ),
+                0
             )::numeric,
             'FM999999990.000'
         )
@@ -730,7 +774,7 @@ SELECT metric,
             clusters_label,
             'Median cluster loss (s)',
             'Median cluster span (s)'
-        ) THEN CAST(
+        ) THEN to_char(
             COALESCE(
                 MAX(
                     CASE
@@ -738,20 +782,25 @@ SELECT metric,
                     END
                 ),
                 0
-            ) AS INTEGER
+            )::numeric,
+            'FM999999990'
         )
         ELSE to_char(
-            MAX(
-                CASE
-                    WHEN idx = 12 THEN val
-                END
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN idx = 12 THEN val
+                    END
+                ),
+                0
             )::numeric,
             'FM999999990.000'
         )
     END AS M1
 FROM kv,
     label
-GROUP BY metric
+GROUP BY metric,
+    clusters_label
 ORDER BY CASE
         metric
         WHEN 'Minimum (ms)' THEN 1
