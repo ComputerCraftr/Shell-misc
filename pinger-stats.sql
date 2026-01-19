@@ -37,60 +37,33 @@ weeks AS (
 periods AS (
     -- Per-day windows: idx = 1..7 (today=1, yesterday=2, ...)
     SELECT (d + 1) AS idx,
-        CAST(
-            strftime(
-                '%s',
-                datetime('now', 'start of day', printf('-%d days', d))
-            ) AS INTEGER
-        ) AS start_sec,
-        CAST(
-            strftime(
-                '%s',
-                datetime(
-                    'now',
-                    'start of day',
-                    printf('-%d days', d),
-                    '+1 day'
-                )
-            ) AS INTEGER
-        ) AS end_sec
+        datetime('now', 'start of day', printf('-%d days', d)) AS start_ts,
+        datetime(
+            'now',
+            'start of day',
+            printf('-%d days', d),
+            '+1 day'
+        ) AS end_ts
     FROM days
     UNION ALL
     -- Weekly windows: idx = 8..11 (W1..W4, midnight-aligned)
     SELECT (w + 8) AS idx,
-        CAST(
-            strftime(
-                '%s',
-                datetime(
-                    'now',
-                    'start of day',
-                    printf('-%d days', w * 7 + 6)
-                )
-            ) AS INTEGER
-        ) AS start_sec,
-        CAST(
-            strftime(
-                '%s',
-                datetime(
-                    'now',
-                    'start of day',
-                    printf('%+d days', 1 - w * 7)
-                )
-            ) AS INTEGER
-        ) AS end_sec
+        datetime(
+            'now',
+            'start of day',
+            printf('-%d days', w * 7 + 6)
+        ) AS start_ts,
+        datetime(
+            'now',
+            'start of day',
+            printf('%+d days', 1 - w * 7)
+        ) AS end_ts
     FROM weeks
     UNION ALL
     -- Monthly window: idx = 12 (last 30 days, midnight-aligned)
     SELECT 12 AS idx,
-        CAST(
-            strftime(
-                '%s',
-                datetime('now', 'start of day', '-29 days')
-            ) AS INTEGER
-        ) AS start_sec,
-        CAST(
-            strftime('%s', datetime('now', 'start of day', '+1 day')) AS INTEGER
-        ) AS end_sec
+        datetime('now', 'start of day', '-29 days') AS start_ts,
+        datetime('now', 'start of day', '+1 day') AS end_ts
 ),
 -- ----------------------------
 -- Raw samples per period
@@ -101,8 +74,8 @@ samples AS (
         CAST(strftime('%s', s.ts) AS INTEGER) AS tsec,
         CAST(s.latency_ms AS REAL) AS rtt
     FROM periods p
-        JOIN pings s ON CAST(strftime('%s', s.ts) AS INTEGER) >= p.start_sec
-        AND CAST(strftime('%s', s.ts) AS INTEGER) < p.end_sec
+        JOIN pings s ON s.ts >= p.start_ts
+        AND s.ts < p.end_ts
 ),
 -- ----------------------------
 -- Basic stats & percentiles (per idx)
