@@ -1,58 +1,61 @@
 #!/bin/sh
-# runit service "apc-watts": log apcupsd watt draw to SQL
+# runit service "power-logger": log power draw to SQL (APC or IPMI)
 # Supports SQLite file or PostgreSQL via Unix socket
 # -------------------------------------------------------------
-# Location: /etc/sv/apc-watts/run
-# Service account: apcwatts
+# Location: /etc/sv/power-logger/run
+# Service account: power-logger
 #
 # Prerequisites (run once as root):
-#   pw groupadd -n apcwatts || true
-#   pw useradd -n apcwatts -g apcwatts -c "apc watts service" -s /usr/sbin/nologin -d /nonexistent -w no || true
-#   install -d -o apcwatts -g apcwatts /var/db/apc-watts
-#   install -d -o root -g apcwatts -m 755 /etc/sv/apc-watts/env
-#   cat > /etc/sv/apc-watts/env/.env.apc-watts <<'EOF'
+#   pw groupadd -n power-logger || true
+#   pw useradd -n power-logger -g power-logger -c "power logger service" -s /usr/sbin/nologin -d /nonexistent -w no || true
+#   install -d -o power-logger -g power-logger /var/db/power-logger
+#   install -d -o root -g power-logger -m 755 /etc/sv/power-logger/env
+#   cat > /etc/sv/power-logger/env/.env.power-logger <<'EOF'
+#   SERVICE_USER=power-logger
 #   RING_BUFFER_DAYS=30
 #   INTERVAL_SEC=1
 #   DB_TYPE=sqlite
 #   EOF
-#   chmod o= /etc/sv/apc-watts/env/.env.apc-watts
-#   chown -R root:apcwatts /etc/sv/apc-watts
+#   chmod o= /etc/sv/power-logger/env/.env.power-logger
+#   chown -R root:power-logger /etc/sv/power-logger
 #
 # If using PostgreSQL, also set PGHOST, PGPORT, PGDATABASE, PGUSER in the .env file.
 # -------------------------------------------------------------
-# Enable service: ln -s /etc/sv/apc-watts /var/service/
-
+# Enable service: ln -s /etc/sv/power-logger /var/service/
 set -eu
-
-# Drop privileges if needed
-current_user=$(id -un)
-if [ "$current_user" != "apcwatts" ]; then
-    exec chpst -u apcwatts /bin/sh "$0" "$@"
-fi
 
 # Load environment
 ENV_DIR="$(dirname "$0")/env"
-[ -f "$ENV_DIR/.env.apc-watts" ] && . "$ENV_DIR/.env.apc-watts"
+[ -f "$ENV_DIR/.env.power-logger" ] && . "$ENV_DIR/.env.power-logger"
 
 # Defaults
+: "${SERVICE_USER:=power-logger}"
 : "${RING_BUFFER_DAYS:=30}"
 : "${INTERVAL_SEC:=1}"
 : "${DB_TYPE:=sqlite}"
-: "${DB_FILE:=/var/db/apc-watts/apc-watts.db}"
+: "${DB_FILE:=/var/db/power-logger/power-logger.db}"
 : "${PGHOST:=/tmp}"
 : "${PGPORT:=5432}"
-: "${PGDATABASE:=apc_watts_db}"
-: "${PGUSER:=apcwatts}"
+: "${PGDATABASE:=power_logger_db}"
+: "${PGUSER:=power_logger}"
+: "${POWER_SOURCE:=apc}"
 : "${APCACCESS_BIN:=apcaccess}"
 : "${APCACCESS_ARGS:=}"
+: "${IPMI_CMD:=ipmitool sdr}"
+: "${IPMI_SENSOR:=Power Meter}"
+
+# Drop privileges if needed
+if [ "$(id -un)" != "$SERVICE_USER" ]; then
+    exec chpst -u "$SERVICE_USER" /bin/sh "$0" "$@"
+fi
 
 case "$INTERVAL_SEC" in
 '' | *[!0-9]*)
-    echo "[apc-watts] ERROR: INTERVAL_SEC must be a positive integer." >&2
+    echo "[power-logger] ERROR: INTERVAL_SEC must be a positive integer." >&2
     exit 1
     ;;
 0)
-    echo "[apc-watts] ERROR: INTERVAL_SEC must be greater than zero." >&2
+    echo "[power-logger] ERROR: INTERVAL_SEC must be greater than zero." >&2
     exit 1
     ;;
 esac
@@ -99,7 +102,7 @@ postgres)
     CLIENT_CMD="psql -qAt -h '$PGHOST' -p '$PGPORT' -U '$PGUSER' -d '$PGDATABASE'"
     ;;
 *)
-    echo "[apc-watts] ERROR: unsupported DB_TYPE='$DB_TYPE'" >&2
+    echo "[power-logger] ERROR: unsupported DB_TYPE='$DB_TYPE'" >&2
     exit 1
     ;;
 esac
@@ -118,22 +121,38 @@ apcaccess_value() {
     eval "$APCACCESS_BIN $APCACCESS_ARGS -u -p $1"
 }
 
+# Extract numeric watts from IPMI SDR output.
+ipmi_power_meter() {
+    eval "$IPMI_CMD" 2>/dev/null | awk -F'|' -v name="$IPMI_SENSOR" '
+        $1 ~ name { gsub(/[^0-9.]/, "", $2); if ($2 != "") { print $2; exit } }
+    '
+}
+
 # Startup delay to ensure unique integer-second timestamps
 sleep 1
 
-# Fetch NOMPOWER once (constant for the UPS)
-while :; do
-    NOMPOWER=$(apcaccess_value NOMPOWER 2>/dev/null || true)
-    case "$NOMPOWER" in
-    '' | *[!0-9.]*)
-        echo "[apc-watts] WARN: invalid NOMPOWER='$NOMPOWER'. Retrying..." >&2
-        sleep 5
-        ;;
-    *)
-        break
-        ;;
-    esac
-done
+case "$POWER_SOURCE" in
+apc)
+    # Fetch NOMPOWER once (constant for the UPS)
+    while :; do
+        NOMPOWER=$(apcaccess_value NOMPOWER 2>/dev/null || true)
+        case "$NOMPOWER" in
+        '' | *[!0-9.]*)
+            echo "[power-logger] WARN: invalid NOMPOWER='$NOMPOWER'. Retrying..." >&2
+            sleep 5
+            ;;
+        *)
+            break
+            ;;
+        esac
+    done
+    ;;
+ipmi) ;;
+*)
+    echo "[power-logger] ERROR: unsupported POWER_SOURCE='$POWER_SOURCE'" >&2
+    exit 1
+    ;;
+esac
 
 while :; do
     # Wait until the scheduled next whole second
@@ -144,16 +163,29 @@ while :; do
     done
     next_tick=$((now + INTERVAL_SEC))
 
-    LOADPCT=$(apcaccess_value LOADPCT 2>/dev/null || true)
-
-    case "$LOADPCT" in
-    '' | *[!0-9.]*)
-        echo "[apc-watts] WARN: invalid LOADPCT='$LOADPCT'." >&2
-        continue
+    case "$POWER_SOURCE" in
+    apc)
+        LOADPCT=$(apcaccess_value LOADPCT 2>/dev/null || true)
+        case "$LOADPCT" in
+        '' | *[!0-9.]*)
+            echo "[power-logger] WARN: invalid LOADPCT='$LOADPCT'." >&2
+            continue
+            ;;
+        esac
+        WATTS=$(echo "$LOADPCT * $NOMPOWER / 100" | bc -l)
+        ;;
+    ipmi)
+        LOADPCT="0"
+        WATTS=$(ipmi_power_meter 2>/dev/null || true)
         ;;
     esac
 
-    WATTS=$(echo "$LOADPCT * $NOMPOWER / 100" | bc -l)
+    case "$WATTS" in
+    '' | *[!0-9.]*)
+        echo "[power-logger] WARN: invalid watts='$WATTS'." >&2
+        continue
+        ;;
+    esac
 
     SQL=$(echo "$UPSERT_SQL" |
         sed "s/%SLOT%/$slot/; s/%WATTS%/$WATTS/; s/%LOADPCT%/$LOADPCT/")
