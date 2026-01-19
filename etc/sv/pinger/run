@@ -11,6 +11,7 @@
 #   install -d -o pinger -g pinger /var/db/pinger
 #   install -d -o root -g pinger -m 755 /etc/sv/pinger/env
 #   cat > /etc/sv/pinger/env/.env.pinger <<'EOF'
+#   SERVICE_USER=pinger
 #   RING_BUFFER_DAYS=30
 #   TARGET=2001:470:20::2
 #   DB_TYPE=sqlite
@@ -21,20 +22,14 @@
 # If using PostgreSQL, also set PGHOST, PGPORT, PGDATABASE, PGUSER in the .env file.
 # -------------------------------------------------------------
 # Enable service: ln -s /etc/sv/pinger /var/service/
-
 set -eu
-
-# Drop privileges if needed
-current_user=$(id -un)
-if [ "$current_user" != "pinger" ]; then
-    exec chpst -u pinger /bin/sh "$0" "$@"
-fi
 
 # Load environment
 ENV_DIR="$(dirname "$0")/env"
 [ -f "$ENV_DIR/.env.pinger" ] && . "$ENV_DIR/.env.pinger"
 
 # Defaults
+: "${SERVICE_USER:=pinger}"
 : "${RING_BUFFER_DAYS:=30}"
 : "${TARGET:=2001:470:20::2}"
 : "${DB_TYPE:=sqlite}"
@@ -43,6 +38,12 @@ ENV_DIR="$(dirname "$0")/env"
 : "${PGPORT:=5432}"
 : "${PGDATABASE:=pinger_db}"
 : "${PGUSER:=pinger}"
+
+# Drop privileges if needed
+if [ "$(id -un)" != "$SERVICE_USER" ]; then
+    exec chpst -u "$SERVICE_USER" /bin/sh "$0" "$@"
+fi
+
 RING_BUFFER_SIZE=$((RING_BUFFER_DAYS * 86400))
 
 # Common SQL templates
@@ -69,7 +70,6 @@ INSERT INTO pings(slot, latency_ms) VALUES(
 EOS
 )
 
-# SQL to fetch last slot
 SELECT_LAST_SLOT="SELECT slot FROM pings ORDER BY ts DESC LIMIT 1;"
 
 # Determine client command and schema substitutions
@@ -107,7 +107,6 @@ while :; do
     while :; do
         now=$(date -u +%s)
         [ "$now" -ge "${next_tick:-0}" ] && break
-        # Fractional sleep is supported on FreeBSD sleep(1); use short naps
         sleep 0.1
     done
     next_tick=$((now + 1))
@@ -116,7 +115,6 @@ while :; do
     rtt=$(ping6 -c 1 -W 1 -q "$TARGET" 2>/dev/null | awk -F/ '/[Mm]in\/avg\/max/ {print $5; exit}')
 
     if [ -n "$rtt" ]; then
-        # Render upsert SQL via sed
         SQL=$(echo "$UPSERT_SQL" |
             sed "s/%SLOT%/$slot/; s/%RTT%/$rtt/")
         echo "$SQL" | eval "$CLIENT_CMD"
