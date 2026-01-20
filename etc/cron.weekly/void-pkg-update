@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+# Update all available packages
+has_cmd() {
+    command -v "$1" >/dev/null 2>&1 && echo 1 || echo 0
+}
+
+has_torsocks=$(has_cmd torsocks)
+has_flatpak=$(has_cmd flatpak)
+
+if [ "$has_torsocks" -eq 1 ]; then
+    torsocks xbps-install -Suy
+else
+    xbps-install -Suy
+fi
+
+if [ "$has_flatpak" -eq 1 ]; then
+    if [ "$has_torsocks" -eq 1 ]; then
+        torsocks flatpak update --noninteractive
+    else
+        flatpak update --noninteractive
+    fi
+fi

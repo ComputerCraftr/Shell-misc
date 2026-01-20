@@ -1,9 +1,0 @@
-#!/bin/sh
-# Update all packages
-if command -v torsocks >/dev/null 2>&1; then
-    torsocks xbps-install -Syu
-    torsocks flatpak update --noninteractive
-else
-    xbps-install -Syu
-    flatpak update --noninteractive
-fi
