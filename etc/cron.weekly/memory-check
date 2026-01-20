@@ -1,0 +1,93 @@
+#!/bin/sh
+set -eu
+
+has_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+has_logger=0
+if has_cmd logger; then
+    has_logger=1
+fi
+
+log() {
+    msg="$1"
+    if [ "$has_logger" -eq 1 ]; then
+        logger -t memory-check "$msg"
+    else
+        printf '%s\n' "$msg" >&2
+    fi
+}
+
+sanitize_log() {
+    awk 'BEGIN { bs = sprintf("%c", 8) }
+        {
+            while (match($0, "." bs)) {
+                $0 = substr($0, 1, RSTART - 1) substr($0, RSTART + 2)
+            }
+            gsub("\r", "")
+            print
+        }'
+}
+
+rand_u16() {
+    od -An -N2 -tu2 /dev/urandom | tr -d ' '
+}
+
+logged_exit=0
+# shellcheck disable=SC2329
+on_exit() {
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ "$logged_exit" -eq 0 ]; then
+        log "memory-check failed status=$rc"
+    fi
+}
+trap on_exit EXIT
+
+if ! has_cmd memtester; then
+    log "memtester not found; skipping"
+    exit 0
+fi
+
+os_name=$(uname -s)
+total_kb=""
+
+case "$os_name" in
+FreeBSD)
+    total_bytes=$(sysctl -n hw.physmem)
+    total_kb=$((total_bytes / 1024))
+    ;;
+Linux)
+    total_kb=$(awk '/MemTotal/ {print $2; exit}' /proc/meminfo)
+    ;;
+*)
+    log "unsupported OS ${os_name}; skipping"
+    exit 0
+    ;;
+esac
+
+# 8% to 12% of RAM
+rand_u16_val=$(rand_u16)
+size_kb=$(((total_kb * (8 * 65535 + 4 * rand_u16_val)) / (100 * 65535)))
+if [ "$size_kb" -lt 1 ]; then
+    size_kb=1
+fi
+
+# 3 to 5 iterations
+rand_iter_val=$(rand_u16)
+iterations=$(((rand_iter_val % 3) + 3))
+
+log "memtester start size=${size_kb}K passes=${iterations} os=${os_name}"
+set +e
+if [ "$has_logger" -eq 1 ]; then
+    memtester_output=$(memtester "${size_kb}K" "$iterations" 2>&1)
+    memtester_status=$?
+    printf '%s\n' "$memtester_output" | sanitize_log | logger -t memory-check
+else
+    memtester "${size_kb}K" "$iterations"
+    memtester_status=$?
+fi
+set -e
+log "memtester exit status=${memtester_status}"
+logged_exit=1
+exit "$memtester_status"
