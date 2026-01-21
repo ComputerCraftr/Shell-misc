@@ -59,6 +59,7 @@ mount_keystore() {
     fi
 
     if ! is_mounted "$MNT_SBCTL"; then
+        mkdir -p "$MNT_BASE/secureboot"
         mount -o ro --bind "$MNT_BASE/secureboot" "$MNT_SBCTL" || die "Failed to mount sbctl keys"
     fi
 }
