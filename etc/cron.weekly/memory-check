@@ -89,5 +89,37 @@ else
 fi
 set -e
 log "memtester exit status=${memtester_status}"
+overall_status=$memtester_status
+
+if has_cmd edac-util; then
+    log "edac-util start"
+    set +e
+    edac_output=$(edac-util -v 2>&1)
+    set -e
+
+    edac_has_errors=0
+    if printf '%s\n' "$edac_output" | grep -Eq '(^|[[:space:]])[1-9][0-9]*[[:space:]]+(Uncorrected|Corrected)[[:space:]]+Error'; then
+        edac_has_errors=1
+    fi
+
+    edac_status=0
+    if [ "$edac_has_errors" -eq 1 ]; then
+        if [ "$has_logger" -eq 1 ]; then
+            printf '%s\n' "$edac_output" | sanitize_log | logger -t memory-check
+        else
+            printf '%s\n' "$edac_output" | sanitize_log
+        fi
+        edac_status=1
+    else
+        log "edac-util: no errors"
+    fi
+    log "edac-util exit status=${edac_status}"
+    if [ "$overall_status" -eq 0 ] && [ "$edac_status" -ne 0 ]; then
+        overall_status=$edac_status
+    fi
+else
+    log "edac-util not found; skipping"
+fi
+
 logged_exit=1
-exit "$memtester_status"
+exit "$overall_status"
