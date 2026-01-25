@@ -1,0 +1,63 @@
+#!/bin/sh
+# init-zram — POSIX sh ZRAM swap setup
+# Defaults: 30% of RAM, capped at 8192 MB (8 GB)
+# Override via environment:
+#   ZRAM_PERCENT=12 ZRAM_MAX_MB=8192 ZRAM_ALGO=zstd
+set -eu
+
+: "${ZRAM_PERCENT:=30}"  # percent of total RAM to use
+: "${ZRAM_MAX_MB:=8192}" # cap in MB (default 8 GB)
+ZRAM_DEV=/dev/zram0      # device
+
+# If already active swap on this device, do nothing.
+if swapon --show=NAME | awk -v d="$ZRAM_DEV" '$1==d{found=1} END{exit !found}'; then
+    exit 0
+fi
+
+ram_kb=$(awk '/MemTotal/ {print $2; exit}' /proc/meminfo)
+
+# Compute size MB = MemTotal * percent / (100 * 1024)
+zram_mb=$((ram_kb * ZRAM_PERCENT / (100 * 1024)))
+if [ "$zram_mb" -le 0 ]; then
+    echo "ERROR: computed zram size is $zram_mb MB" >&2
+    exit 1
+fi
+
+# Apply cap
+if [ "$zram_mb" -gt "$ZRAM_MAX_MB" ]; then
+    zram_mb=$ZRAM_MAX_MB
+fi
+
+# Load module (ignore if already loaded)
+modprobe zram num_devices=1 || modprobe zram
+
+devbase=$(basename "$ZRAM_DEV")
+sysdir="/sys/block/$devbase"
+
+if [ ! -d "$sysdir" ]; then
+    echo "ERROR: $sysdir not present (zram device not available?)" >&2
+    exit 1
+fi
+
+# If device was previously configured, reset before changing disksize
+if [ -w "$sysdir/reset" ]; then
+    echo 1 >"$sysdir/reset" || true
+fi
+
+# Set algorithm if requested and supported
+if [ -n "${ZRAM_ALGO:-}" ] && [ -w "$sysdir/comp_algorithm" ]; then
+    echo "$ZRAM_ALGO" >"$sysdir/comp_algorithm" || true
+fi
+
+# Set size, format, enable
+echo "${zram_mb}M" >"$sysdir/disksize"
+
+mkswap "$ZRAM_DEV" >/dev/null 2>&1 || {
+    echo "ERROR: mkswap failed on $ZRAM_DEV" >&2
+    exit 1
+}
+
+swapon "$ZRAM_DEV" || {
+    echo "ERROR: swapon failed on $ZRAM_DEV" >&2
+    exit 1
+}
