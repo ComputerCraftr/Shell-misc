@@ -15,12 +15,22 @@ log() {
     if [ "$has_logger" -eq 1 ]; then
         logger -t memory-check "$msg"
     else
+        printf '%s\n' "$msg"
+    fi
+}
+
+log_err() {
+    msg="$1"
+    if [ "$has_logger" -eq 1 ]; then
+        logger -t memory-check "$msg"
+    else
         printf '%s\n' "$msg" >&2
     fi
 }
 
 sanitize_log() {
     awk 'BEGIN { bs = sprintf("%c", 8) }
+        /trying mlock .*too many pages, reducing/ { next }
         {
             while (match($0, "." bs)) {
                 $0 = substr($0, 1, RSTART - 1) substr($0, RSTART + 2)
@@ -39,14 +49,14 @@ logged_exit=0
 on_exit() {
     rc=$?
     if [ "$rc" -ne 0 ] && [ "$logged_exit" -eq 0 ]; then
-        log "memory-check failed status=$rc"
+        log_err "memory-check failed status=$rc"
     fi
 }
 trap on_exit EXIT
 
 if ! has_cmd memtester; then
-    log "memtester not found; skipping"
-    exit 0
+    log_err "ERROR: memtester not found"
+    exit 1
 fi
 
 os_name=$(uname -s)
@@ -56,13 +66,19 @@ case "$os_name" in
 FreeBSD)
     total_bytes=$(sysctl -n hw.physmem)
     total_kb=$((total_bytes / 1024))
+    # shellcheck disable=SC3045
+    memlock_limit=$(ulimit -l 2>/dev/null || echo unknown)
+    if [ "$memlock_limit" != "unlimited" ]; then
+        log_err "ERROR: memlock limit not unlimited (${memlock_limit})"
+        exit 1
+    fi
     ;;
 Linux)
     total_kb=$(awk '/MemTotal/ {print $2; exit}' /proc/meminfo)
     ;;
 *)
-    log "unsupported OS ${os_name}; skipping"
-    exit 0
+    log_err "ERROR: unsupported OS ${os_name}"
+    exit 1
     ;;
 esac
 
@@ -93,9 +109,7 @@ overall_status=$memtester_status
 
 if has_cmd edac-util; then
     log "edac-util start"
-    set +e
-    edac_output=$(edac-util -v 2>&1)
-    set -e
+    edac_output=$(edac-util -v 2>&1 || true)
 
     edac_has_errors=0
     if printf '%s\n' "$edac_output" | grep -Eq '(^|[[:space:]])[1-9][0-9]*[[:space:]]+(Uncorrected|Corrected)[[:space:]]+Error'; then
