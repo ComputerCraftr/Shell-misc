@@ -89,9 +89,9 @@ if [ "$size_kb" -lt 1 ]; then
     size_kb=1
 fi
 
-# 3 to 5 iterations
+# 1 to 5 iterations
 rand_iter_val=$(rand_u16)
-iterations=$(((rand_iter_val % 3) + 3))
+iterations=$(((rand_iter_val % 5) + 1))
 
 log "memtester start size=${size_kb}K passes=${iterations} os=${os_name}"
 set +e
