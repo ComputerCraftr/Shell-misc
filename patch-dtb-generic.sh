@@ -76,7 +76,7 @@ dts_out="$tmpdir/${base}.patched.dts"
 
 "$DTC" -I dtb -O dts -o "$dts_in" "$IN"
 
-awk -v NODES="$NODES" '
+if ! awk -v NODES="$NODES" '
     function split_nodes(s,   n,i,a) {
         n = split(s, a, /[[:space:]]+/)
         for (i=1; i<=n; i++) if (a[i] != "") want[a[i]] = 1
@@ -90,6 +90,12 @@ awk -v NODES="$NODES" '
             else if (c == "}") delta--
         }
         return delta
+    }
+
+    function leading_ws(s,   t) {
+        t = s
+        sub(/[^[:space:]].*$/, "", t)
+        return t
     }
 
     BEGIN {
@@ -117,8 +123,7 @@ awk -v NODES="$NODES" '
                     node_indent = ""
                     prop_indent = ""
                     saw_prop_indent = 0
-                    match(line, /^[[:space:]]*/, m)
-                    node_indent = m[0]
+                    node_indent = leading_ws(line)
                     prop_indent = node_indent "\t"
 
                     print line
@@ -130,8 +135,7 @@ awk -v NODES="$NODES" '
 
         if (in_node) {
             if (!saw_prop_indent && line ~ /^[[:space:]]*[^[:space:]}]/) {
-                match(line, /^[[:space:]]*/, m)
-                prop_indent = m[0]
+                prop_indent = leading_ws(line)
                 saw_prop_indent = 1
             }
             # --- Broken CD: remove cd-gpios and cd-inverted
@@ -147,8 +151,7 @@ awk -v NODES="$NODES" '
             if (line ~ /^[[:space:]]*pinctrl-names[[:space:]]*=/) {
                 saw_pinctrl_names = 1
                 indent = ""
-                match(line, /^[[:space:]]*/, m)
-                indent = m[0]
+                indent = leading_ws(line)
                 print indent "pinctrl-names = \"default\";"
                 brace_depth += delta
                 next
@@ -178,7 +181,15 @@ awk -v NODES="$NODES" '
         print line
         brace_depth += delta
     }
-' <"$dts_in" >"$dts_out"
+' <"$dts_in" >"$dts_out"; then
+    echo "ERROR: awk failed while patching DTS" >&2
+    exit 1
+fi
+
+if [ ! -s "$dts_out" ]; then
+    echo "ERROR: awk produced empty DTS output" >&2
+    exit 1
+fi
 
 # Recompile (try -@ for symbols; fall back if unsupported)
 if "$DTC" -@ -I dts -O dtb -o "$tmpdir/out.dtb" "$dts_out" 2>/dev/null; then
