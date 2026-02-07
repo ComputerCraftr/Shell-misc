@@ -1,0 +1,12 @@
+[Unit]
+Description=Initialize ZRAM swap
+After=systemd-modules-load.service
+Before=swap.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/init-zram
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
