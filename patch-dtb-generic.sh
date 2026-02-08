@@ -109,6 +109,12 @@ if ! awk -v NODES="$NODES" '
         line = $0
         delta = count_braces(line)
 
+        # Drop turbo-mode from OPP tables (or anywhere it appears).
+        if (line ~ /^[[:space:]]*turbo-mode[[:space:]]*;[[:space:]]*$/) {
+            brace_depth += delta
+            next
+        }
+
         # Enter a target node by header name, e.g. "sdh@d4280000 {"
         if (!in_node) {
             for (n in want) {
