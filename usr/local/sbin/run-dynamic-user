@@ -279,7 +279,7 @@ cleanup() {
         rm -rf "$PERSIST_DIR"
     fi
 }
-trap cleanup EXIT INT TERM
+trap 'cleanup' EXIT INT TERM HUP
 
 install -d -m 700 -o root -g "$ROOT_GROUP" "$SRV_RUN"
 install -d -m 700 -o root -g "$ROOT_GROUP" "$PERSIST_DIR"

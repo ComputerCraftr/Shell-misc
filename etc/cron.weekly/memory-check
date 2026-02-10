@@ -45,14 +45,18 @@ rand_u16() {
 }
 
 logged_exit=0
-# shellcheck disable=SC2329
 on_exit() {
-    rc=$?
-    if [ "$rc" -ne 0 ] && [ "$logged_exit" -eq 0 ]; then
+    rc=$1
+    if [ "$logged_exit" -eq 1 ]; then
+        return
+    elif [ "$rc" -ne 0 ]; then
         log_err "memory-check failed status=$rc"
+    else
+        log "memory-check succeeded status=$rc"
     fi
+    logged_exit=1
 }
-trap on_exit EXIT
+trap 'on_exit $?' EXIT INT TERM HUP
 
 if ! has_cmd memtester; then
     log_err "ERROR: memtester not found"
@@ -128,12 +132,12 @@ if has_cmd edac-util; then
         log "edac-util: no errors"
     fi
     log "edac-util exit status=${edac_status}"
-    if [ "$overall_status" -eq 0 ] && [ "$edac_status" -ne 0 ]; then
+    if [ "$overall_status" -eq 0 ]; then
         overall_status=$edac_status
     fi
 else
     log "edac-util not found; skipping"
 fi
 
-logged_exit=1
+on_exit "$overall_status"
 exit "$overall_status"

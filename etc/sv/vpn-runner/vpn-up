@@ -39,8 +39,8 @@ if [ -e "$LOCKFILE" ]; then
     rm -f "$LOCKFILE"
 fi
 
-trap 'rm -f "$LOCKFILE"' INT TERM HUP EXIT
 echo $$ >"$LOCKFILE"
+trap 'rm -f "$LOCKFILE"' EXIT INT TERM HUP
 
 # Restart ipfw if we need to detect and apply rules on a new interface.
 if { [ -n "$GIF_IF" ] && ! ipfw list | grep -qwF "$GIF_IF"; } ||

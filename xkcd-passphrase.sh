@@ -38,8 +38,8 @@ if [ ! -r "$WORDLIST" ]; then
 fi
 
 # Prepare temporary filtered wordlist
-TMP_LIST=$(mktemp) || exit 1
-trap 'rm -f "$TMP_LIST"' EXIT
+TMP_LIST=$(mktemp)
+trap 'rm -f "$TMP_LIST"' EXIT INT TERM HUP
 
 grep -E '^[a-z]+$' "$WORDLIST" >"$TMP_LIST"
 TOTAL=$(wc -l <"$TMP_LIST")

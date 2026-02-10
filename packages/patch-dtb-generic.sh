@@ -58,17 +58,11 @@ command -v "$DTC" >/dev/null 2>&1 || {
     exit 1
 }
 
-tmpdir=""
-cleanup() { [ -n "$tmpdir" ] && rm -rf "$tmpdir"; }
-trap cleanup EXIT INT TERM
-if tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/dtbpatch.XXXXXXXX" 2>/dev/null); then
-    :
-else
-    tmpdir=$(mktemp -d 2>/dev/null) || {
-        echo "ERROR: mktemp -d failed" >&2
-        exit 1
-    }
-fi
+tmpdir=$(
+    mktemp -d "${TMPDIR:-/tmp}/dtbpatch.XXXXXXXX" 2>/dev/null ||
+        mktemp -d
+)
+trap 'rm -rf "$tmpdir"' EXIT INT TERM HUP
 
 base="$(basename "$IN")"
 dts_in="$tmpdir/${base}.dts"
@@ -198,11 +192,8 @@ if [ ! -s "$dts_out" ]; then
 fi
 
 # Recompile (try -@ for symbols; fall back if unsupported)
-if "$DTC" -@ -I dts -O dtb -o "$tmpdir/out.dtb" "$dts_out" 2>/dev/null; then
-    :
-else
+"$DTC" -@ -I dts -O dtb -o "$tmpdir/out.dtb" "$dts_out" 2>/dev/null ||
     "$DTC" -I dts -O dtb -o "$tmpdir/out.dtb" "$dts_out"
-fi
 
 mv "$tmpdir/out.dtb" "$OUT"
 
