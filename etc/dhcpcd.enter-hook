@@ -1,0 +1,26 @@
+#!/bin/sh
+set -e
+
+had_u=0
+case $- in
+*u*) had_u=1 ;;
+esac
+set -u
+
+run() {
+    # Exit if interface is missing
+    [ -n "${interface-}" ] || return 0
+
+    # Exit for loopback interfaces
+    case "$interface" in
+    lo*) return 0 ;;
+    esac
+
+    # Enable IPv6 temporary addresses for non-loopback interfaces
+    if sysctl -q "net.ipv6.conf.$interface.use_tempaddr" >/dev/null 2>&1; then
+        sysctl -q -w "net.ipv6.conf.$interface.use_tempaddr=2" >/dev/null 2>&1
+    fi
+}
+
+run
+[ "$had_u" -eq 1 ] || set +u
