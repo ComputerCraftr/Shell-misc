@@ -1,7 +1,7 @@
 #!/bin/sh
 # run-dynamic-user: wrapper to launch or cleanup a runit service with a secure, unprivileged dynamic user
-# Usage (in service run script): /path/to/run-dynamic-user --service NAME [--create-home] -- <command> [args...]
-# Usage (in service finish script): /path/to/run-dynamic-user --finish --service NAME
+# Usage (in service run script): /path/to/run-dynamic-user --service NAME [--create-home] [--uid-min N --uid-max N --gid-min N --gid-max N] -- <command> [args...]
+# Usage (in service finish script): /path/to/run-dynamic-user --finish --service NAME [--uid-min N --uid-max N --gid-min N --gid-max N]
 # Example runit run script:
 #   #!/bin/sh
 #   exec /path/to/run-dynamic-user --service myservice --create-home -- your-daemon --flags
@@ -9,110 +9,1257 @@
 set -eu
 umask 077
 
-if [ "$(id -u)" -ne 0 ]; then
-    echo "Error: This script must be run as root." >&2
-    exit 1
-fi
+# Immutable script/runtime constants.
+SCRIPT_NAME=run-dynamic-user
+LINUX_RUNTIME_BASE=/run
+FREEBSD_RUNTIME_BASE=/var/run
+LINUX_PERSIST_BASE=/var/lib/runit-dynuser
+FREEBSD_PERSIST_BASE=/var/db/runit-dynuser
+DEFAULT_SYSTEM_ID_MIN=60001
+DEFAULT_SYSTEM_ID_MAX=64999
+DYNAMIC_USER_PREFIX=svc
+DYNAMIC_NAME_ATTEMPTS=5
+DYNAMIC_NAME_RANDOM_LEN=10
+FAULT_RETRY_DELAY=30
+FAULT_STATE_DIR_NAME=.run-dynamic-user-faults
+SERVICE_LOCK_DIR_NAME=.run-dynamic-user-locks
+LOCK_WAIT_LOG_INTERVAL=30
 
-usage() {
-    echo "Usage: $0 --service NAME [--create-home] -- <command> [args...]" >&2
-    echo "       $0 --finish --service NAME" >&2
+# Reused path/validation labels.
+LABEL_RUNTIME_DIRECTORY="Runtime directory"
+LABEL_PERSISTENT_DIRECTORY="Persistent directory"
+LABEL_IDENTITY_FILE="Identity file"
+LABEL_FAULT_STATE_FILE="Fault state file"
+LABEL_FAULT_STATE_LOCK_DIRECTORY="Fault state lock directory"
+LABEL_SERVICE_LOCK_DIRECTORY="Service lock directory"
+
+# Durable-fault policy keys.
+FAULT_KEY_MISSING_IDENTITY_AMBIGUOUS_STATE="missing-identity-ambiguous-state"
+FAULT_KEY_CLEANUP_FAILED="cleanup-failed"
+FAULT_KEY_DYNAMIC_STATE_STILL_PRESENT="dynamic-state-still-present"
+
+# Existing-state inspection status codes.
+STATE_NONE=0
+STATE_STALE_WITHOUT_IDENTITY=10
+STATE_STALE_WITH_IDENTITY=11
+STATE_ACTIVE_WITH_IDENTITY=12
+
+# Cleanup result status codes.
+CLEANUP_NO_STATE=0
+CLEANUP_CLEANED=10
+CLEANUP_REFUSED_ACTIVE=11
+CLEANUP_REFUSED_AMBIGUOUS_MISSING_IDENTITY=12
+CLEANUP_INVALID_STATE=13
+CLEANUP_FAILED=14
+
+# Missing-identity recovery status codes.
+RECOVER_MISSING_IDENTITY_NONE=10
+RECOVER_MISSING_IDENTITY_AMBIGUOUS=11
+RECOVER_MISSING_IDENTITY_ACTIVE=12
+
+# Lock helper status codes.
+LOCK_HOLDER_STALE=10
+LOCK_HOLDER_WAIT=11
+
+# Existing identity validation status codes.
+IDENTITY_STATE_VALID=0
+IDENTITY_STATE_INVALID_USER_NAME=10
+IDENTITY_STATE_UNEXPECTED_USER_NAME=11
+IDENTITY_STATE_UNEXPECTED_GROUP_NAME=12
+IDENTITY_STATE_INVALID_UID=13
+IDENTITY_STATE_INVALID_GID=14
+IDENTITY_STATE_INVALID_RECORD=15
+
+# Parsed CLI/config state.
+FINISH_MODE=false
+ENABLE_HOME=false
+SERVICE=""
+DYNAMIC_USER_UID_MIN=""
+DYNAMIC_USER_UID_MAX=""
+DYNAMIC_USER_GID_MIN=""
+DYNAMIC_USER_GID_MAX=""
+UID_MIN_OVERRIDDEN=false
+UID_MAX_OVERRIDDEN=false
+GID_MIN_OVERRIDDEN=false
+GID_MAX_OVERRIDDEN=false
+COMMAND_SKIP_COUNT=0
+
+# Derived platform/runtime context.
+OS=""
+RUNTIME_BASE=""
+PERSIST_BASE=""
+SYSTEM_UID_MIN=""
+SYSTEM_UID_MAX=""
+SYSTEM_GID_MIN=""
+SYSTEM_GID_MAX=""
+ROOT_GROUP=""
+SRV_RUN=""
+PERSIST_DIR=""
+PERSIST_ID=""
+
+# Existing persisted identity state.
+EXISTING_USER_NAME=""
+EXISTING_USER_ID=""
+EXISTING_GROUP_NAME=""
+EXISTING_GROUP_ID=""
+
+# Current startup/trap state.
+ACCOUNT_NAME=""
+ACCOUNT_UID=""
+ACCOUNT_GID=""
+CREATED_RUNTIME_DIR=false
+CREATED_PERSIST_DIR=false
+IN_CLEANUP=false
+SERVICE_LOCK_HELD=false
+PENDING_EXIT_MODE=none
+PENDING_FAULT_KEY=""
+PENDING_FAULT_MESSAGE=""
+READ_FAULT_STATE_OWNER_PID=""
+READ_FAULT_STATE_KEY=""
+
+has_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+log() {
+    msg="$1"
+    if has_cmd logger; then
+        logger -t "$SCRIPT_NAME" -p daemon.notice "$msg"
+    else
+        printf '%s\n' "$msg" >&2
+    fi
+}
+
+log_err() {
+    msg="$1"
+    if has_cmd logger; then
+        logger -t "$SCRIPT_NAME" -p daemon.err "$msg"
+    else
+        printf '%s\n' "$msg" >&2
+    fi
+}
+
+release_service_lock_if_held_outside_cleanup() {
+    if [ "${IN_CLEANUP-}" != true ] && [ "${SERVICE_LOCK_HELD-}" = true ]; then
+        release_service_lock || true
+    fi
+}
+
+fail_fast() {
+    release_service_lock_if_held_outside_cleanup
+    log_err "$1"
     exit 1
 }
 
-finish=false
-enable_home=false
-SERVICE=""
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-    --finish)
-        finish=true
-        shift
+fail_with_mode() {
+    fail_mode="$1"
+    fault_key="$2"
+    message="$3"
+
+    if [ "${IN_CLEANUP-}" = true ]; then
+        log_err "$message"
+        exit 1
+    fi
+
+    case "$fail_mode" in
+    fast)
+        fail_fast "$message"
         ;;
-    --service)
-        SERVICE="${2-}"
-        case "$SERVICE" in
-        [A-Za-z0-9_-]*) ;;
-        *) usage ;;
-        esac
-        shift 2
+    runtime)
+        if runtime_faults_ready; then
+            fail_durable "$fault_key" "$message"
+        fi
+        fail_fast "$message"
         ;;
-    --create-home)
-        enable_home=true
-        shift
-        ;;
-    --help | -h)
-        usage
-        ;;
-    --)
-        shift
-        break
+    startup)
+        if runtime_faults_ready; then
+            queue_pending_failure durable "$fault_key" "$message"
+        else
+            queue_pending_failure fast "" "$message"
+        fi
+        exit 1
         ;;
     *)
-        usage
+        fail_fast "Unknown failure mode: $fail_mode"
         ;;
     esac
-done
+}
 
-if [ -z "$SERVICE" ]; then
-    echo "Service name is required (use --service)." >&2
-    usage
-fi
+run_or_fail() {
+    fail_mode="$1"
+    fault_key="$2"
+    message="$3"
+    shift 3
+    [ "${1-}" = "--" ] && shift
+    if "$@"; then
+        return 0
+    fi
+    fail_with_mode "$fail_mode" "$fault_key" "$message"
+}
 
-if [ "$finish" = true ]; then
-    [ "$enable_home" = false ] || usage
-    [ "$#" -eq 0 ] || usage
-else
-    [ "$#" -ge 1 ] || usage
-fi
+run_or_fail_cleanup() {
+    message="$1"
+    shift
+    [ "${1-}" = "--" ] && shift
+    if "$@"; then
+        return 0
+    fi
+    log_err "$message"
+    return 1
+}
 
-OS="$(uname -s)"
-case "$OS" in
-Linux) RUNTIME_BASE="/run" ;;
-FreeBSD) RUNTIME_BASE="/var/run" ;;
-*)
-    echo "Unsupported OS: $OS" >&2
+write_lines_atomically() {
+    target_path="$1"
+    target_mode="$2"
+    shift 2
+
+    target_dir=$(dirname "$target_path")
+    temp_path=$(mktemp "${target_dir}/.${SCRIPT_NAME}.tmp.XXXXXX") || return 1
+    if ! chmod "$target_mode" "$temp_path"; then
+        rm -f -- "$temp_path"
+        return 1
+    fi
+    if ! printf '%s\n' "$@" >"$temp_path"; then
+        rm -f -- "$temp_path"
+        return 1
+    fi
+    if ! mv -f -- "$temp_path" "$target_path"; then
+        rm -f -- "$temp_path"
+        return 1
+    fi
+}
+
+is_decimal() {
+    value="$1"
+    case "$value" in
+    '' | *[!0-9]*) return 1 ;;
+    *) return 0 ;;
+    esac
+}
+
+matches_single_line_ascii_regex() {
+    value="$1"
+    regex="$2"
+    newline=$(printf '\nX')
+    newline=${newline%X}
+    carriage_return=$(printf '\r')
+
+    case "$value" in
+    *"$newline"* | *"$carriage_return"*)
+        return 1
+        ;;
+    esac
+    LC_ALL=C printf '%s\n' "$value" | grep -Eq "$regex"
+}
+
+is_nonempty_single_line_text() {
+    value="$1"
+    newline=$(printf '\nX')
+    newline=${newline%X}
+    carriage_return=$(printf '\r')
+
+    case "$value" in
+    '' | *"$newline"* | *"$carriage_return"*)
+        return 1
+        ;;
+    *)
+        return 0
+        ;;
+    esac
+}
+
+is_valid_service_name() {
+    value="$1"
+    matches_single_line_ascii_regex "$value" '^[a-z0-9][a-z0-9_-]*$'
+}
+
+is_valid_account_name() {
+    value="$1"
+    matches_single_line_ascii_regex "$value" '^[a-z_][a-z0-9_-]*$'
+}
+
+is_valid_dynamic_account_name() {
+    value="$1"
+    prefix=$(dynamic_account_prefix)
+    matches_single_line_ascii_regex "$value" "^${prefix}[a-z0-9]{${DYNAMIC_NAME_RANDOM_LEN}}$"
+}
+
+dynamic_account_prefix() {
+    printf '%s_%s_' "$DYNAMIC_USER_PREFIX" "$SERVICE"
+}
+
+home_creation_enabled() {
+    [ "$ENABLE_HOME" = true ]
+}
+
+dynamic_home_directory_path() {
+    printf '%s/home\n' "$SRV_RUN"
+}
+
+user_account_home_path() {
+    if home_creation_enabled; then
+        dynamic_home_directory_path
+    else
+        printf '/nonexistent\n'
+    fi
+}
+
+service_workdir_path() {
+    printf '%s/work\n' "$SRV_RUN"
+}
+
+active_dynamic_user_fault_key() {
+    printf 'active-dynamic-user:%s\n' "$EXISTING_USER_ID"
+}
+
+getent_entry_exists() {
+    getent_database="$1"
+    getent_key="$2"
+    getent "$getent_database" "$getent_key" >/dev/null 2>&1
+}
+
+dynamic_account_name_available() {
+    candidate="$1"
+    ! getent_entry_exists passwd "$candidate" && ! getent_entry_exists group "$candidate"
+}
+
+dynamic_user_exists_by_name() {
+    getent_entry_exists passwd "$1"
+}
+
+dynamic_group_exists_by_name() {
+    getent_entry_exists group "$1"
+}
+
+remove_principal_if_present() {
+    principal_kind="$1"
+    principal_name="$2"
+    service_name="$3"
+
+    case "$principal_kind" in
+    user)
+        principal_label="dynamic user"
+        principal_exists() {
+            dynamic_user_exists_by_name "$principal_name"
+        }
+        delete_principal() {
+            del_user "$principal_name" >/dev/null 2>&1
+        }
+        ;;
+    group)
+        principal_label="dynamic group"
+        principal_exists() {
+            dynamic_group_exists_by_name "$principal_name"
+        }
+        delete_principal() {
+            del_group "$principal_name" >/dev/null 2>&1
+        }
+        ;;
+    *)
+        fail_fast "Unknown principal kind: $principal_kind"
+        ;;
+    esac
+
+    if principal_exists; then
+        delete_principal || true
+        if principal_exists; then
+            log_err "Failed to remove $principal_label '$principal_name' for service '$service_name'"
+            return 1
+        fi
+        return 0
+    fi
+
+    log "Dynamic $principal_kind '$principal_name' already absent for service '$service_name'; continuing cleanup"
+    return 0
+}
+
+fail_active_dynamic_user() {
+    fail_durable \
+        "$(active_dynamic_user_fault_key)" \
+        "Refusing to clean active dynamic user state for $SERVICE uid='$EXISTING_USER_ID'"
+}
+
+set_existing_identity() {
+    EXISTING_USER_NAME="$1"
+    EXISTING_USER_ID="$2"
+    EXISTING_GROUP_NAME="$3"
+    EXISTING_GROUP_ID="$4"
+}
+
+validate_identity_values() {
+    identity_user_name="$1"
+    identity_user_id="$2"
+    identity_group_name="$3"
+    identity_group_id="$4"
+
+    if ! is_valid_account_name "$identity_user_name"; then
+        return "$IDENTITY_STATE_INVALID_USER_NAME"
+    fi
+    if ! is_valid_dynamic_account_name "$identity_user_name"; then
+        return "$IDENTITY_STATE_UNEXPECTED_USER_NAME"
+    fi
+    case "$identity_group_name" in
+    "$identity_user_name") ;;
+    *)
+        return "$IDENTITY_STATE_UNEXPECTED_GROUP_NAME"
+        ;;
+    esac
+    if ! is_decimal "$identity_user_id"; then
+        return "$IDENTITY_STATE_INVALID_UID"
+    fi
+    if ! is_decimal "$identity_group_id"; then
+        return "$IDENTITY_STATE_INVALID_GID"
+    fi
+    return "$IDENTITY_STATE_VALID"
+}
+
+load_existing_identity_from_record() {
+    identity_record="$1"
+
+    case "$identity_record" in
+    *:*:*:*:*)
+        return "$IDENTITY_STATE_INVALID_RECORD"
+        ;;
+    *:*:*:*) ;;
+    *)
+        return "$IDENTITY_STATE_INVALID_RECORD"
+        ;;
+    esac
+
+    identity_user_name=${identity_record%%:*}
+    identity_record=${identity_record#*:}
+    identity_user_id=${identity_record%%:*}
+    identity_record=${identity_record#*:}
+    identity_group_name=${identity_record%%:*}
+    identity_group_id=${identity_record#*:}
+
+    validate_identity_values \
+        "$identity_user_name" \
+        "$identity_user_id" \
+        "$identity_group_name" \
+        "$identity_group_id"
+    identity_status=$?
+    case "$identity_status" in
+    "$IDENTITY_STATE_VALID") ;;
+    *)
+        return "$identity_status"
+        ;;
+    esac
+
+    set_existing_identity \
+        "$identity_user_name" \
+        "$identity_user_id" \
+        "$identity_group_name" \
+        "$identity_group_id"
+    return "$IDENTITY_STATE_VALID"
+}
+
+load_identity_record() {
+    path="$1"
+    service_name="$2"
+
+    ensure_nonsymlink_regular_file "$path" "$LABEL_IDENTITY_FILE"
+    if ! IFS= read -r identity_record <"$path"; then
+        fail_with_mode runtime \
+            "empty-identity-file" \
+            "Identity file is empty for service $service_name"
+    fi
+    load_existing_identity_from_record "$identity_record"
+    identity_status=$?
+    case "$identity_status" in
+    "$IDENTITY_STATE_VALID") ;;
+    "$IDENTITY_STATE_INVALID_RECORD")
+        fail_with_mode runtime \
+            "invalid-identity-record" \
+            "Invalid identity record format for service $service_name"
+        ;;
+    "$IDENTITY_STATE_INVALID_USER_NAME")
+        fail_with_mode runtime \
+            "invalid-identity-user-name" \
+            "Invalid user name recorded for $service_name"
+        ;;
+    "$IDENTITY_STATE_UNEXPECTED_USER_NAME")
+        fail_with_mode runtime \
+            "unexpected-identity-user-name" \
+            "Refusing to use unexpected user $EXISTING_USER_NAME for service $service_name"
+        ;;
+    "$IDENTITY_STATE_UNEXPECTED_GROUP_NAME")
+        fail_with_mode runtime \
+            "unexpected-identity-group-name" \
+            "Refusing to use unexpected group $EXISTING_GROUP_NAME for service $service_name"
+        ;;
+    "$IDENTITY_STATE_INVALID_UID")
+        fail_with_mode runtime \
+            "invalid-identity-uid" \
+            "Invalid UID recorded for $service_name"
+        ;;
+    "$IDENTITY_STATE_INVALID_GID")
+        fail_with_mode runtime \
+            "invalid-identity-gid" \
+            "Invalid GID recorded for $service_name"
+        ;;
+    *)
+        fail_with_mode runtime \
+            "invalid-identity-state" \
+            "Invalid identity state recorded for $service_name"
+        ;;
+    esac
+}
+
+ensure_nonsymlink_directory_exists() {
+    path="$1"
+    label="$2"
+    if [ -L "$path" ]; then
+        fail_with_mode runtime \
+            "symlinked-directory:${label}" \
+            "$label must not be a symlink: $path"
+    fi
+    if [ ! -d "$path" ]; then
+        fail_with_mode runtime \
+            "missing-directory:${label}" \
+            "$label does not exist or is not a directory: $path"
+    fi
+}
+
+ensure_nonsymlink_directory_or_absent() {
+    path="$1"
+    label="$2"
+    if [ -L "$path" ]; then
+        fail_with_mode runtime \
+            "symlinked-directory:${label}" \
+            "$label must not be a symlink: $path"
+    fi
+    if [ -e "$path" ] && [ ! -d "$path" ]; then
+        fail_with_mode runtime \
+            "non-directory-path:${label}" \
+            "$label exists but is not a directory: $path"
+    fi
+}
+
+ensure_nonsymlink_directory_path() {
+    path="$1"
+    label="$2"
+    ensure_nonsymlink_directory_or_absent "$path" "$label"
+    parent_dir=$(dirname "$path")
+    if [ ! -d "$parent_dir" ]; then
+        fail_with_mode runtime \
+            "missing-parent-directory:${label}" \
+            "$label parent directory does not exist: $parent_dir"
+    fi
+}
+
+remove_nonsymlink_directory_tree() {
+    path="$1"
+    label="$2"
+    ensure_nonsymlink_directory_or_absent "$path" "$label"
+    if [ -d "$path" ]; then
+        run_or_fail_cleanup \
+            "Failed to remove $label: $path" \
+            -- rm -rf -- "$path"
+    fi
+}
+
+ensure_nonsymlink_regular_file() {
+    path="$1"
+    label="$2"
+    if [ -L "$path" ]; then
+        fail_with_mode runtime \
+            "symlinked-regular-file:${label}" \
+            "$label must not be a symlink: $path"
+    fi
+    if [ ! -f "$path" ]; then
+        fail_with_mode runtime \
+            "missing-regular-file:${label}" \
+            "$label does not exist or is not a regular file: $path"
+    fi
+}
+
+ensure_nonsymlink_regular_file_or_absent() {
+    path="$1"
+    label="$2"
+    if [ -L "$path" ]; then
+        fail_with_mode runtime \
+            "symlinked-regular-file:${label}" \
+            "$label must not be a symlink: $path"
+    fi
+    if [ -e "$path" ] && [ ! -f "$path" ]; then
+        fail_with_mode runtime \
+            "non-regular-file-path:${label}" \
+            "$label exists but is not a regular file: $path"
+    fi
+}
+
+dynamic_state_exists() {
+    [ -e "$SRV_RUN" ] || [ -e "$PERSIST_DIR" ] || [ -e "$PERSIST_ID" ]
+}
+
+recorded_uid_has_live_processes() {
+    [ -n "${EXISTING_USER_ID-}" ] && pgrep -u "$EXISTING_USER_ID" >/dev/null 2>&1
+}
+
+# Locking/state roles are intentionally separate:
+# - service lock: serializes same-service startup/finish/setup/cleanup
+# - identity file: records which dynamic account belongs to this service state
+# - fault lock/file: serializes durable fault marker updates only
+fault_state_path() {
+    printf '%s/%s/%s\n' "$RUNTIME_BASE" "$FAULT_STATE_DIR_NAME" "$SERVICE"
+}
+
+fault_state_lock_dir() {
+    printf '%s.lock\n' "$(fault_state_path)"
+}
+
+fault_state_lock_pid_file() {
+    printf '%s/pid\n' "$(fault_state_lock_dir)"
+}
+
+service_lock_parent_dir() {
+    printf '%s/%s\n' "$RUNTIME_BASE" "$SERVICE_LOCK_DIR_NAME"
+}
+
+service_lock_dir() {
+    printf '%s/%s.lock\n' "$(service_lock_parent_dir)" "$SERVICE"
+}
+
+service_lock_pid_file() {
+    printf '%s/pid\n' "$(service_lock_dir)"
+}
+
+find_unique_dynamic_identity_record() {
+    prefix=$(dynamic_account_prefix)
+
+    awk -F: -v prefix="$prefix" -v suffix_len="$DYNAMIC_NAME_RANDOM_LEN" '
+        function scan_database(cmd, kind,    line, fields, count, candidate_name, candidate_id) {
+            count = 0
+            while ((cmd | getline line) > 0) {
+                split(line, fields, ":")
+                if (index(fields[1], prefix) == 1 &&
+                    length(fields[1]) == length(prefix) + suffix_len &&
+                    fields[1] ~ ("^" prefix "[a-z0-9]+$")) {
+                    count++
+                    if (count == 1) {
+                        candidate_name = fields[1]
+                        candidate_id = fields[3]
+                    }
+                }
+            }
+            close(cmd)
+            if (kind == "passwd" && count == 1) {
+                passwd_name = candidate_name
+                passwd_id = candidate_id
+            }
+            if (kind == "group" && count == 1) {
+                group_name = candidate_name
+                group_id = candidate_id
+            }
+            return count
+        }
+
+        BEGIN {
+            passwd_count = scan_database("getent passwd", "passwd")
+            group_count = scan_database("getent group", "group")
+
+            if (passwd_count == 0 && group_count == 0) {
+                exit 10
+            }
+            if (passwd_count != 1 || group_count != 1) {
+                exit 11
+            }
+            if (passwd_name != group_name) {
+                exit 11
+            }
+            printf "%s:%s:%s:%s\n", passwd_name, passwd_id, group_name, group_id
+        }
+    '
+}
+
+recover_and_set_missing_identity_state() {
+    recovered_identity_record=""
+
+    if recovered_identity_record=$(find_unique_dynamic_identity_record); then
+        recovery_status=0
+    else
+        recovery_status=$?
+    fi
+    case "$recovery_status" in
+    0) ;;
+    "$RECOVER_MISSING_IDENTITY_NONE")
+        return "$RECOVER_MISSING_IDENTITY_NONE"
+        ;;
+    *)
+        return "$RECOVER_MISSING_IDENTITY_AMBIGUOUS"
+        ;;
+    esac
+    load_existing_identity_from_record "$recovered_identity_record"
+    identity_status=$?
+    if [ "$identity_status" -ne "$IDENTITY_STATE_VALID" ]; then
+        return "$RECOVER_MISSING_IDENTITY_AMBIGUOUS"
+    fi
+    if recorded_uid_has_live_processes; then
+        return "$RECOVER_MISSING_IDENTITY_ACTIVE"
+    fi
+    return 0
+}
+
+validate_dynamic_state_paths() {
+    ensure_nonsymlink_directory_or_absent "$SRV_RUN" "$LABEL_RUNTIME_DIRECTORY"
+    ensure_nonsymlink_directory_or_absent "$PERSIST_DIR" "$LABEL_PERSISTENT_DIRECTORY"
+    ensure_nonsymlink_regular_file_or_absent "$PERSIST_ID" "$LABEL_IDENTITY_FILE"
+}
+
+remove_dynamic_state_paths() {
+    remove_nonsymlink_directory_tree "$SRV_RUN" "$LABEL_RUNTIME_DIRECTORY"
+    remove_nonsymlink_directory_tree "$PERSIST_DIR" "$LABEL_PERSISTENT_DIRECTORY"
+}
+
+runtime_faults_ready() {
+    [ -n "${SERVICE-}" ] &&
+        [ -n "${RUNTIME_BASE-}" ] &&
+        [ -n "${ROOT_GROUP-}" ] &&
+        [ -d "$RUNTIME_BASE" ]
+}
+
+validate_lock_release_paths() {
+    lock_dir="$1"
+    lock_pid_file="$2"
+    lock_label="$3"
+
+    if [ -L "$lock_dir" ]; then
+        log_err "$lock_label must not be a symlink: $lock_dir"
+        return 1
+    fi
+    if [ -e "$lock_dir" ] && [ ! -d "$lock_dir" ]; then
+        log_err "$lock_label exists but is not a directory: $lock_dir"
+        return 1
+    fi
+    if [ ! -d "$lock_dir" ]; then
+        return 0
+    fi
+    if [ -L "$lock_pid_file" ]; then
+        log_err "$lock_label pid file must not be a symlink: $lock_pid_file"
+        return 1
+    fi
+    if [ -e "$lock_pid_file" ] && [ ! -f "$lock_pid_file" ]; then
+        log_err "$lock_label pid path exists but is not a regular file: $lock_pid_file"
+        return 1
+    fi
+    return 0
+}
+
+ensure_lock_paths_or_fail() {
+    lock_dir="$1"
+    lock_pid_file="$2"
+    lock_label="$3"
+    fail_mode="$4"
+    fault_key="$5"
+
+    if [ -L "$lock_dir" ]; then
+        fail_with_mode "$fail_mode" "$fault_key" "$lock_label must not be a symlink: $lock_dir"
+    fi
+    if [ -e "$lock_dir" ] && [ ! -d "$lock_dir" ]; then
+        fail_with_mode "$fail_mode" "$fault_key" "$lock_label exists but is not a directory: $lock_dir"
+    fi
+    if [ -L "$lock_pid_file" ]; then
+        fail_with_mode "$fail_mode" "$fault_key" "$lock_label pid file must not be a symlink: $lock_pid_file"
+    fi
+    if [ -e "$lock_pid_file" ] && [ ! -f "$lock_pid_file" ]; then
+        fail_with_mode "$fail_mode" "$fault_key" "$lock_label pid path exists but is not a regular file: $lock_pid_file"
+    fi
+}
+
+clear_stale_lock_dir_contents() {
+    lock_dir="$1"
+    lock_pid_file="$2"
+    lock_label="$3"
+
+    ensure_lock_paths_or_fail "$lock_dir" "$lock_pid_file" "$lock_label" fast "stale-lock-path"
+    if [ -f "$lock_pid_file" ] && ! rm -f -- "$lock_pid_file"; then
+        fail_fast "Failed to remove stale $lock_label pid file: $lock_pid_file"
+    fi
+    if [ -d "$lock_dir" ] && ! rmdir "$lock_dir"; then
+        fail_fast "Refusing to remove non-empty stale $lock_label: $lock_dir"
+    fi
+}
+
+release_owned_lock_dir() {
+    lock_dir="$1"
+    lock_pid_file="$2"
+    lock_label="$3"
+
+    if ! validate_lock_release_paths "$lock_dir" "$lock_pid_file" "$lock_label"; then
+        return 1
+    fi
+    if [ ! -d "$lock_dir" ]; then
+        return 0
+    fi
+
+    lock_pid=""
+    if [ -f "$lock_pid_file" ]; then
+        IFS= read -r lock_pid <"$lock_pid_file" || true
+    fi
+    if [ -n "$lock_pid" ] && [ "$lock_pid" != "$$" ]; then
+        return 0
+    fi
+    if [ -f "$lock_pid_file" ] && ! rm -f -- "$lock_pid_file"; then
+        log_err "Failed to remove $lock_label pid file: $lock_pid_file"
+        return 1
+    fi
+    if ! rmdir "$lock_dir"; then
+        log_err "Refusing to remove non-empty $lock_label: $lock_dir"
+        return 1
+    fi
+    return 0
+}
+
+existing_lock_holder_status() {
+    lock_pid="$1"
+
+    case "$lock_pid" in
+    '' | *[!0-9]*)
+        return "$LOCK_HOLDER_STALE"
+        ;;
+    *)
+        if kill -0 "$lock_pid" 2>/dev/null; then
+            return "$LOCK_HOLDER_WAIT"
+        fi
+        return "$LOCK_HOLDER_STALE"
+        ;;
+    esac
+}
+
+acquire_lock_dir_or_fail() {
+    lock_dir="$1"
+    lock_pid_file="$2"
+    lock_label="$3"
+    fail_mode="$4"
+    fault_key="$5"
+
+    ensure_lock_paths_or_fail \
+        "$lock_dir" \
+        "$lock_pid_file" \
+        "$lock_label" \
+        "$fail_mode" \
+        "$fault_key"
+
+    wait_logged=false
+    wait_started_at=$(date +%s 2>/dev/null || echo 0)
+    while ! mkdir "$lock_dir" 2>/dev/null; do
+        lock_pid=""
+        if [ -f "$lock_pid_file" ]; then
+            IFS= read -r lock_pid <"$lock_pid_file" || true
+        fi
+        existing_lock_holder_status "$lock_pid"
+        holder_status=$?
+        case "$holder_status" in
+        "$LOCK_HOLDER_STALE")
+            clear_stale_lock_dir_contents "$lock_dir" "$lock_pid_file" "$lock_label"
+            continue
+            ;;
+        "$LOCK_HOLDER_WAIT")
+            now_ts=$(date +%s 2>/dev/null || echo 0)
+            if [ "$wait_logged" = false ] &&
+                [ "$now_ts" -gt 0 ] &&
+                [ "$wait_started_at" -gt 0 ] &&
+                [ $((now_ts - wait_started_at)) -ge "$LOCK_WAIT_LOG_INTERVAL" ]; then
+                log "Waiting for $lock_label held by pid='$lock_pid' path='$lock_dir'"
+                wait_logged=true
+            fi
+            ;;
+        *)
+            fail_fast "Unknown lock holder status: $holder_status"
+            ;;
+        esac
+        sleep 1
+    done
+}
+
+ensure_fault_state_dir_mode() {
+    fail_mode="$1"
+    fault_state_dir="${RUNTIME_BASE}/${FAULT_STATE_DIR_NAME}"
+    ensure_nonsymlink_directory_or_absent "$fault_state_dir" "Fault state directory"
+    if [ ! -d "$fault_state_dir" ]; then
+        run_or_fail "$fail_mode" \
+            "create-fault-state-directory" \
+            "Failed to create directory: $fault_state_dir" \
+            -- install -d -m 700 -o root -g "$ROOT_GROUP" "$fault_state_dir"
+    fi
+}
+
+ensure_service_lock_parent_dir() {
+    service_lock_parent=$(service_lock_parent_dir)
+    ensure_nonsymlink_directory_or_absent "$service_lock_parent" "Service lock parent directory"
+    if [ ! -d "$service_lock_parent" ]; then
+        run_or_fail fast \
+            "create-directory" \
+            "Failed to create directory: $service_lock_parent" \
+            -- install -d -m 700 -o root -g "$ROOT_GROUP" "$service_lock_parent"
+    fi
+}
+
+with_fault_state_lock_mode() {
+    fail_mode="$1"
+    shift
+    action="$1"
+    shift
+
+    ensure_fault_state_dir_mode "$fail_mode"
+    lock_dir=$(fault_state_lock_dir)
+    lock_pid_file=$(fault_state_lock_pid_file)
+    # Fault state is shared per service. Serialize readers and writers with a
+    # per-service mkdir lock so same-service fault marker updates do not race.
+    # Record the owner PID inside the lock directory so a later process can
+    # recover a stale lock after a crash.
+    acquire_lock_dir_or_fail \
+        "$lock_dir" \
+        "$lock_pid_file" \
+        "$LABEL_FAULT_STATE_LOCK_DIRECTORY" \
+        "$fail_mode" \
+        "fault-state-lock-path"
+
+    if ! write_lines_atomically "$lock_pid_file" 600 "$$"; then
+        fail_with_mode "$fail_mode" \
+            "fault-state-lock-pid-write" \
+            "Failed to write fault state lock pid file: $lock_pid_file"
+    fi
+
+    if "$action" "$@"; then
+        action_status=0
+    else
+        action_status=$?
+    fi
+
+    if ! release_owned_lock_dir "$lock_dir" "$lock_pid_file" "$LABEL_FAULT_STATE_LOCK_DIRECTORY"; then
+        fail_fast "Failed to release fault state lock directory: $lock_dir"
+    fi
+    return "$action_status"
+}
+
+acquire_service_lock() {
+    ensure_service_lock_parent_dir
+    lock_dir=$(service_lock_dir)
+    lock_pid_file=$(service_lock_pid_file)
+    # The service lock serializes same-service startup, finish, state cleanup,
+    # and setup so path validation remains true until handoff to exec or trap
+    # rollback. Fault locking stays separate and only protects the fault file.
+    acquire_lock_dir_or_fail \
+        "$lock_dir" \
+        "$lock_pid_file" \
+        "$LABEL_SERVICE_LOCK_DIRECTORY" \
+        fast \
+        "service-lock-path"
+
+    if ! write_lines_atomically "$lock_pid_file" 600 "$$"; then
+        fail_fast "Failed to write service lock pid file: $lock_pid_file"
+    fi
+    SERVICE_LOCK_HELD=true
+}
+
+release_service_lock() {
+    if [ "$SERVICE_LOCK_HELD" != true ]; then
+        return 0
+    fi
+    lock_dir=$(service_lock_dir)
+    lock_pid_file=$(service_lock_pid_file)
+    if ! release_owned_lock_dir "$lock_dir" "$lock_pid_file" "$LABEL_SERVICE_LOCK_DIRECTORY"; then
+        return 1
+    fi
+    SERVICE_LOCK_HELD=false
+    return 0
+}
+
+write_fault_key_locked() {
+    fault_state_file="$1"
+    fault_key="$2"
+
+    is_nonempty_single_line_text "$fault_key" || return 1
+    write_lines_atomically "$fault_state_file" 600 "$$" "$fault_key"
+}
+
+read_fault_state_locked() {
+    fault_state_file="$1"
+    fault_state_owner_pid=""
+    fault_state_key=""
+
+    READ_FAULT_STATE_OWNER_PID=""
+    READ_FAULT_STATE_KEY=""
+
+    {
+        IFS= read -r fault_state_owner_pid &&
+            IFS= read -r fault_state_key &&
+            ! IFS= read -r _extra_fault_state_line
+    } <"$fault_state_file" || return 1
+
+    if ! is_decimal "$fault_state_owner_pid"; then
+        return 1
+    fi
+    is_nonempty_single_line_text "$fault_state_key" || return 1
+
+    READ_FAULT_STATE_OWNER_PID="$fault_state_owner_pid"
+    READ_FAULT_STATE_KEY="$fault_state_key"
+    return 0
+}
+
+sync_fault_key_locked() {
+    fault_state_file="$1"
+    fault_key="$2"
+    current_fault_key=""
+
+    if [ -f "$fault_state_file" ] && read_fault_state_locked "$fault_state_file"; then
+        current_fault_key="$READ_FAULT_STATE_KEY"
+    fi
+    if [ "$current_fault_key" != "$fault_key" ]; then
+        write_fault_key_locked "$fault_state_file" "$fault_key"
+        return 0
+    fi
+    return 1
+}
+
+clear_fault_key_locked_if_safe() {
+    fault_state_file="$1"
+    fault_key_owner_pid=""
+    if [ -f "$fault_state_file" ]; then
+        if read_fault_state_locked "$fault_state_file"; then
+            fault_key_owner_pid="$READ_FAULT_STATE_OWNER_PID"
+        else
+            rm -f -- "$fault_state_file"
+            return 0
+        fi
+    fi
+    if [ -n "$fault_key_owner_pid" ] && ! kill -0 "$fault_key_owner_pid" 2>/dev/null; then
+        rm -f -- "$fault_state_file"
+    fi
+}
+
+clear_fault_key_locked_for_dead_owner() {
+    fault_state_file="$1"
+    if [ -e "$fault_state_file" ]; then
+        clear_fault_key_locked_if_safe "$fault_state_file"
+    fi
+}
+
+clear_fault_state_mode() {
+    fail_mode="$1"
+    fault_state_file=$(fault_state_path)
+    if [ -L "$fault_state_file" ]; then
+        fail_with_mode \
+            "$fail_mode" \
+            "symlinked-regular-file:${LABEL_FAULT_STATE_FILE}" \
+            "$LABEL_FAULT_STATE_FILE must not be a symlink: $fault_state_file"
+    fi
+    if [ -e "$fault_state_file" ] && [ ! -f "$fault_state_file" ]; then
+        fail_with_mode \
+            "$fail_mode" \
+            "non-regular-file-path:${LABEL_FAULT_STATE_FILE}" \
+            "$LABEL_FAULT_STATE_FILE exists but is not a regular file: $fault_state_file"
+    fi
+    with_fault_state_lock_mode "$fail_mode" clear_fault_key_locked_for_dead_owner "$fault_state_file"
+}
+
+fail_durable() {
+    fault_key="$1"
+    message="$2"
+    fault_state_file=$(fault_state_path)
+
+    release_service_lock_if_held_outside_cleanup
+    ensure_nonsymlink_regular_file_or_absent "$fault_state_file" "$LABEL_FAULT_STATE_FILE"
+    if with_fault_state_lock_mode runtime sync_fault_key_locked "$fault_state_file" "$fault_key"; then
+        log_err "$message"
+    fi
+
+    sleep "$FAULT_RETRY_DELAY"
     exit 1
-    ;;
-esac
-[ -d "$RUNTIME_BASE" ] || RUNTIME_BASE="/run"
+}
 
-if [ -d "/var/lib" ]; then
-    PERSIST_BASE="/var/lib/runit-dynuser"
-else
-    PERSIST_BASE="/var/db/runit-dynuser"
-fi
+reset_pending_failure_state() {
+    PENDING_EXIT_MODE=none
+    PENDING_FAULT_KEY=""
+    PENDING_FAULT_MESSAGE=""
+}
 
-DEFAULT_SYS_MIN=60001
-DEFAULT_SYS_MAX=64999
-SYS_UID_MIN="$DEFAULT_SYS_MIN"
-SYS_UID_MAX="$DEFAULT_SYS_MAX"
-SYS_GID_MIN="$DEFAULT_SYS_MIN"
-SYS_GID_MAX="$DEFAULT_SYS_MAX"
+queue_pending_failure() {
+    PENDING_EXIT_MODE="$1"
+    PENDING_FAULT_KEY="$2"
+    PENDING_FAULT_MESSAGE="$3"
+}
 
-if [ "$OS" = "Linux" ] && [ -r /etc/login.defs ]; then
-    sys_uid_min=$(awk '$1=="SYS_UID_MIN"{print $2; exit}' /etc/login.defs 2>/dev/null || true)
-    sys_uid_max=$(awk '$1=="SYS_UID_MAX"{print $2; exit}' /etc/login.defs 2>/dev/null || true)
-    sys_gid_min=$(awk '$1=="SYS_GID_MIN"{print $2; exit}' /etc/login.defs 2>/dev/null || true)
-    sys_gid_max=$(awk '$1=="SYS_GID_MAX"{print $2; exit}' /etc/login.defs 2>/dev/null || true)
+finalize_pending_failure_after_cleanup() {
+    pending_exit_mode="$PENDING_EXIT_MODE"
+    pending_fault_key="$PENDING_FAULT_KEY"
+    pending_fault_message="$PENDING_FAULT_MESSAGE"
 
-    case "$sys_uid_min" in
-    '' | *[!0-9]*) ;;
-    *) SYS_UID_MIN="$sys_uid_min" ;;
+    reset_pending_failure_state
+
+    case "$pending_exit_mode" in
+    none)
+        return 0
+        ;;
+    fast)
+        fail_fast "$pending_fault_message"
+        ;;
+    durable)
+        fail_durable "$pending_fault_key" "$pending_fault_message"
+        ;;
+    *)
+        fail_fast "Unknown pending exit mode: $pending_exit_mode"
+        ;;
     esac
-    case "$sys_uid_max" in
-    '' | *[!0-9]*) ;;
-    *) SYS_UID_MAX="$sys_uid_max" ;;
+}
+
+inspect_existing_state() {
+    if ! dynamic_state_exists; then
+        return "$STATE_NONE"
+    fi
+    if [ ! -e "$PERSIST_ID" ]; then
+        return "$STATE_STALE_WITHOUT_IDENTITY"
+    fi
+
+    load_identity_record "$PERSIST_ID" "$SERVICE"
+    if recorded_uid_has_live_processes; then
+        return "$STATE_ACTIVE_WITH_IDENTITY"
+    fi
+
+    return "$STATE_STALE_WITH_IDENTITY"
+}
+
+remove_trap_state_paths() {
+    if [ "$CREATED_RUNTIME_DIR" = true ]; then
+        remove_nonsymlink_directory_tree "$SRV_RUN" "$LABEL_RUNTIME_DIRECTORY"
+    fi
+    if [ "$CREATED_PERSIST_DIR" = true ]; then
+        remove_nonsymlink_directory_tree "$PERSIST_DIR" "$LABEL_PERSISTENT_DIRECTORY"
+    fi
+}
+
+cleanup_recorded_identity_state() {
+    remove_principal_if_present user "$EXISTING_USER_NAME" "$SERVICE" || return 1
+    remove_principal_if_present group "$EXISTING_GROUP_NAME" "$SERVICE" || return 1
+    remove_dynamic_state_paths || return 1
+    log "Removed dynamic user '$EXISTING_USER_NAME' uid='$EXISTING_USER_ID' gid='$EXISTING_GROUP_ID' for service '$SERVICE'"
+}
+
+perform_cleanup_for_existing_state() {
+    existing_state_status="$1"
+    case "$existing_state_status" in
+    "$STATE_NONE")
+        return "$CLEANUP_NO_STATE"
+        ;;
+    "$STATE_STALE_WITHOUT_IDENTITY")
+        recover_and_set_missing_identity_state
+        recovery_status=$?
+        case "$recovery_status" in
+        0)
+            log "Recovered missing identity for service '$SERVICE' from stale passwd/group state user='$EXISTING_USER_NAME' uid='$EXISTING_USER_ID' gid='$EXISTING_GROUP_ID'"
+            if ! cleanup_recorded_identity_state; then
+                return "$CLEANUP_FAILED"
+            fi
+            return "$CLEANUP_CLEANED"
+            ;;
+        "$RECOVER_MISSING_IDENTITY_ACTIVE")
+            return "$CLEANUP_REFUSED_ACTIVE"
+            ;;
+        "$RECOVER_MISSING_IDENTITY_AMBIGUOUS")
+            return "$CLEANUP_REFUSED_AMBIGUOUS_MISSING_IDENTITY"
+            ;;
+        "$RECOVER_MISSING_IDENTITY_NONE") ;;
+        *)
+            return "$CLEANUP_INVALID_STATE"
+            ;;
+        esac
+        log "Missing identity file for service '$SERVICE'; removing runtime and persist directories"
+        if ! remove_dynamic_state_paths; then
+            return "$CLEANUP_FAILED"
+        fi
+        return "$CLEANUP_CLEANED"
+        ;;
+    "$STATE_STALE_WITH_IDENTITY")
+        if ! cleanup_recorded_identity_state; then
+            return "$CLEANUP_FAILED"
+        fi
+        return "$CLEANUP_CLEANED"
+        ;;
+    "$STATE_ACTIVE_WITH_IDENTITY")
+        return "$CLEANUP_REFUSED_ACTIVE"
+        ;;
+    *)
+        return "$CLEANUP_INVALID_STATE"
+        ;;
     esac
-    case "$sys_gid_min" in
-    '' | *[!0-9]*) ;;
-    *) SYS_GID_MIN="$sys_gid_min" ;;
+}
+
+handle_cleanup_result_or_fail() {
+    cleanup_result="$1"
+    existing_state_status="$2"
+
+    case "$cleanup_result" in
+    "$CLEANUP_REFUSED_ACTIVE")
+        fail_active_dynamic_user
+        ;;
+    "$CLEANUP_REFUSED_AMBIGUOUS_MISSING_IDENTITY")
+        fail_durable \
+            "$FAULT_KEY_MISSING_IDENTITY_AMBIGUOUS_STATE" \
+            "Refusing to clean state for $SERVICE without identity file because matching dynamic accounts are ambiguous or inconsistent"
+        ;;
+    "$CLEANUP_INVALID_STATE")
+        fail_fast "Unknown existing state status: $existing_state_status"
+        ;;
+    "$CLEANUP_FAILED")
+        fail_durable \
+            "$FAULT_KEY_CLEANUP_FAILED" \
+            "Failed to clean dynamic user state for service '$SERVICE'"
+        ;;
+    *)
+        fail_fast "Unknown cleanup result: $cleanup_result"
+        ;;
     esac
-    case "$sys_gid_max" in
-    '' | *[!0-9]*) ;;
-    *) SYS_GID_MAX="$sys_gid_max" ;;
+}
+
+run_finish_cleanup_top_level() {
+    validate_dynamic_state_paths
+    existing_state_status="$STATE_NONE"
+    inspect_existing_state || existing_state_status=$?
+    cleanup_result="$CLEANUP_NO_STATE"
+    perform_cleanup_for_existing_state "$existing_state_status" || cleanup_result=$?
+
+    case "$cleanup_result" in
+    "$CLEANUP_NO_STATE")
+        log "No dynamic user state found for service '$SERVICE'"
+        return 0
+        ;;
+    "$CLEANUP_CLEANED")
+        clear_fault_state_mode runtime
+        return 0
+        ;;
+    *)
+        handle_cleanup_result_or_fail "$cleanup_result" "$existing_state_status"
+        ;;
     esac
-fi
+}
+
+handle_existing_state_for_startup() {
+    validate_dynamic_state_paths
+    existing_state_status="$STATE_NONE"
+    inspect_existing_state || existing_state_status=$?
+    cleanup_result="$CLEANUP_NO_STATE"
+    perform_cleanup_for_existing_state "$existing_state_status" || cleanup_result=$?
+
+    case "$cleanup_result" in
+    "$CLEANUP_NO_STATE")
+        return 0
+        ;;
+    "$CLEANUP_CLEANED")
+        clear_fault_state_mode runtime
+        ;;
+    *)
+        handle_cleanup_result_or_fail "$cleanup_result" "$existing_state_status"
+        ;;
+    esac
+
+    if dynamic_state_exists; then
+        fail_durable \
+            "$FAULT_KEY_DYNAMIC_STATE_STILL_PRESENT" \
+            "Refusing to start: dynamic user state still present for $SERVICE."
+    fi
+}
 
 add_group() {
     name="$1"
@@ -154,199 +1301,400 @@ del_group() {
     esac
 }
 
-ROOT_GROUP="$(id -gn 0)"
+first_free_getent_id() {
+    getent_database="$1"
+    min_id="$2"
+    max_id="$3"
+    for id in $(seq "$min_id" "$max_id"); do
+        if ! getent "$getent_database" "$id" >/dev/null 2>&1; then
+            printf '%s\n' "$id"
+            return 0
+        fi
+    done
+    return 1
+}
 
-SRV_RUN="${RUNTIME_BASE}/${SERVICE}"
-PERSIST_DIR="${PERSIST_BASE}/${SERVICE}"
-PERSIST_ID="${PERSIST_DIR}/identity"
-
-if [ "$finish" = true ]; then
-    [ -L "$SRV_RUN" ] && {
-        echo "Refusing to touch symlinked runtime directory $SRV_RUN" >&2
-        exit 1
-    }
-
-    [ -L "$PERSIST_DIR" ] && {
-        echo "Refusing to touch symlinked persistent directory $PERSIST_DIR" >&2
-        exit 1
-    }
-
-    if [ ! -f "$PERSIST_ID" ] && [ ! -d "$SRV_RUN" ]; then
-        exit 0
-    fi
-
-    if [ ! -f "$PERSIST_ID" ]; then
-        rm -rf "$SRV_RUN" "$PERSIST_DIR"
-        exit 0
-    fi
-
-    IFS=':' read -r USER UID GROUP GID <"$PERSIST_ID"
-
-    case "$USER" in
-    svc_${SERVICE}_*) ;;
-    *)
-        echo "Refusing to delete unexpected user $USER for service $SERVICE" >&2
-        exit 1
-        ;;
-    esac
-
-    case "$GROUP" in
-    "$USER") ;;
-    *)
-        echo "Refusing to delete unexpected group $GROUP for service $SERVICE" >&2
-        exit 1
-        ;;
-    esac
-
-    case "$UID" in
-    '' | *[!0-9]*)
-        echo "Invalid UID recorded for $SERVICE" >&2
-        exit 1
-        ;;
-    esac
-
-    case "$GID" in
-    '' | *[!0-9]*)
-        echo "Invalid GID recorded for $SERVICE" >&2
-        exit 1
-        ;;
-    esac
-
-    if pgrep -u "$UID" >/dev/null 2>&1; then
-        pkill -TERM -u "$UID" >/dev/null 2>&1 || true
-        sleep 1
-        pkill -KILL -u "$UID" >/dev/null 2>&1 || true
-    fi
-
-    del_user "$USER" >/dev/null 2>&1 || true
-    del_group "$GROUP" >/dev/null 2>&1 || true
-
-    rm -rf "$SRV_RUN" "$PERSIST_DIR"
-    exit 0
-fi
-
-if [ -L "$SRV_RUN" ]; then
-    echo "Refusing to use symlinked runtime directory $SRV_RUN" >&2
-    exit 1
-fi
-
-if [ -e "$SRV_RUN" ]; then
-    STALE="true"
-fi
-
-if [ -L "$PERSIST_DIR" ]; then
-    echo "Refusing to use symlinked persistent directory $PERSIST_DIR" >&2
-    exit 1
-fi
-
-if [ -e "$PERSIST_ID" ]; then
-    STALE="true"
-fi
-
-if [ "${STALE-}" = "true" ]; then
-    echo "Stale dynamic user state detected; invoking cleanup for $SERVICE" >&2
-    if ! "$0" --finish --service "$SERVICE"; then
-        echo "Failed to clean previous dynamic user state for $SERVICE." >&2
-        exit 1
-    fi
-fi
-
-if [ -e "$SRV_RUN" ] || [ -e "$PERSIST_ID" ]; then
-    echo "Refusing to start: dynamic user state still present for $SERVICE." >&2
-    exit 1
-fi
-
-UID=""
-GID=""
-CLEAN_USER=""
-CLEAN_GROUP=""
-CLEAN_PERSIST=false
 cleanup() {
-    # Cleanup only runs if setup fails before exec
-    if [ -n "$CLEAN_USER" ] && [ -n "$UID" ]; then
-        pkill -u "$UID" >/dev/null 2>&1 || true
+    trap - EXIT INT TERM HUP
+    IN_CLEANUP=true
+    # Cleanup is rollback-only. Durable fault policy is decided before exit,
+    # then finalized here after rollback if a pending failure was queued.
+    if [ -n "$ACCOUNT_NAME" ] && [ -n "$ACCOUNT_UID" ]; then
+        pkill -u "$ACCOUNT_UID" >/dev/null 2>&1 || true
     fi
-    if [ -n "$CLEAN_USER" ]; then
-        del_user "$CLEAN_USER" >/dev/null 2>&1 || true
+    if [ -n "$ACCOUNT_NAME" ]; then
+        if ! remove_principal_if_present user "$ACCOUNT_NAME" "$SERVICE"; then
+            log_err "Startup rollback left dynamic user '$ACCOUNT_NAME' present for service '$SERVICE'"
+        fi
+        if ! remove_principal_if_present group "$ACCOUNT_NAME" "$SERVICE"; then
+            log_err "Startup rollback left dynamic group '$ACCOUNT_NAME' present for service '$SERVICE'"
+        fi
     fi
-    if [ -n "$CLEAN_GROUP" ]; then
-        del_group "$CLEAN_GROUP" >/dev/null 2>&1 || true
-    fi
-    if [ -d "$SRV_RUN" ]; then
-        rm -rf "$SRV_RUN"
-    fi
-    if [ "$CLEAN_PERSIST" = true ] && [ -d "$PERSIST_DIR" ]; then
-        rm -rf "$PERSIST_DIR"
+    remove_trap_state_paths
+    release_service_lock || true
+    finalize_pending_failure_after_cleanup
+}
+
+require_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        fail_fast "Error: This script must be run as root."
     fi
 }
-trap 'cleanup' EXIT INT TERM HUP
 
-install -d -m 700 -o root -g "$ROOT_GROUP" "$SRV_RUN"
-install -d -m 700 -o root -g "$ROOT_GROUP" "$PERSIST_DIR"
-CLEAN_PERSIST=true
+print_usage() {
+    output_fd="${1:-2}"
+    echo "Usage: $0 --service NAME [--create-home] [--uid-min N --uid-max N --gid-min N --gid-max N] -- <command> [args...]" >&"$output_fd"
+    echo "       $0 --finish --service NAME [--uid-min N --uid-max N --gid-min N --gid-max N]" >&"$output_fd"
+}
 
-DYN_HOME="/nonexistent"
-[ "$enable_home" = true ] && DYN_HOME="$SRV_RUN/home"
+usage_error() {
+    print_usage 2
+    exit 2
+}
 
-# Generate a unique dynamic user/group name
-USER=""
-GROUP=""
-for _ in 1 2 3 4 5; do
-    dynrand=$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 10)
-    candidate="svc_${SERVICE}_${dynrand}"
-    if ! getent passwd "$candidate" >/dev/null 2>&1 && ! getent group "$candidate" >/dev/null 2>&1; then
-        USER="$candidate"
-        GROUP="$candidate"
-        break
+show_help() {
+    print_usage 1
+    exit 0
+}
+
+reset_cli_state() {
+    FINISH_MODE=false
+    ENABLE_HOME=false
+    SERVICE=""
+    DYNAMIC_USER_UID_MIN=""
+    DYNAMIC_USER_UID_MAX=""
+    DYNAMIC_USER_GID_MIN=""
+    DYNAMIC_USER_GID_MAX=""
+    UID_MIN_OVERRIDDEN=false
+    UID_MAX_OVERRIDDEN=false
+    GID_MIN_OVERRIDDEN=false
+    GID_MAX_OVERRIDDEN=false
+    COMMAND_SKIP_COUNT=0
+}
+
+reset_derived_runtime_context() {
+    OS=""
+    RUNTIME_BASE=""
+    PERSIST_BASE=""
+    SYSTEM_UID_MIN=""
+    SYSTEM_UID_MAX=""
+    SYSTEM_GID_MIN=""
+    SYSTEM_GID_MAX=""
+    ROOT_GROUP=""
+    SRV_RUN=""
+    PERSIST_DIR=""
+    PERSIST_ID=""
+}
+
+reset_existing_identity_state() {
+    EXISTING_USER_NAME=""
+    EXISTING_USER_ID=""
+    EXISTING_GROUP_NAME=""
+    EXISTING_GROUP_ID=""
+}
+
+validate_cli_args() {
+    if [ -z "$SERVICE" ]; then
+        log_err "Service name is required (use --service)."
+        usage_error
     fi
-done
 
-if [ -z "$USER" ] || [ -z "$GROUP" ]; then
-    echo "Unable to generate unique dynamic user name." >&2
-    exit 1
-fi
+    for bound in \
+        "$DYNAMIC_USER_UID_MIN" \
+        "$DYNAMIC_USER_UID_MAX" \
+        "$DYNAMIC_USER_GID_MIN" \
+        "$DYNAMIC_USER_GID_MAX"; do
+        [ -z "$bound" ] || is_decimal "$bound" || usage_error
+    done
 
-for id in $(seq "$SYS_UID_MIN" "$SYS_UID_MAX"); do
-    if ! getent passwd "$id" >/dev/null 2>&1; then
-        UID="$id"
-        break
+    if [ "$FINISH_MODE" = true ]; then
+        [ "$ENABLE_HOME" = false ] || usage_error
+        [ "$#" -eq 0 ] || usage_error
+    else
+        [ "$#" -ge 1 ] || usage_error
     fi
-done
+}
 
-if [ -n "$UID" ] && [ "$UID" -ge "$SYS_GID_MIN" ] && [ "$UID" -le "$SYS_GID_MAX" ]; then
-    if ! getent group "$UID" >/dev/null 2>&1; then
-        GID="$UID"
+parse_args() {
+    reset_cli_state
+    parsed_arg_count=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+        --finish)
+            FINISH_MODE=true
+            shift
+            parsed_arg_count=$((parsed_arg_count + 1))
+            ;;
+        --service)
+            SERVICE="${2-}"
+            is_valid_service_name "$SERVICE" || usage_error
+            shift 2
+            parsed_arg_count=$((parsed_arg_count + 2))
+            ;;
+        --create-home)
+            ENABLE_HOME=true
+            shift
+            parsed_arg_count=$((parsed_arg_count + 1))
+            ;;
+        --uid-min)
+            DYNAMIC_USER_UID_MIN="${2-}"
+            UID_MIN_OVERRIDDEN=true
+            shift 2
+            parsed_arg_count=$((parsed_arg_count + 2))
+            ;;
+        --uid-max)
+            DYNAMIC_USER_UID_MAX="${2-}"
+            UID_MAX_OVERRIDDEN=true
+            shift 2
+            parsed_arg_count=$((parsed_arg_count + 2))
+            ;;
+        --gid-min)
+            DYNAMIC_USER_GID_MIN="${2-}"
+            GID_MIN_OVERRIDDEN=true
+            shift 2
+            parsed_arg_count=$((parsed_arg_count + 2))
+            ;;
+        --gid-max)
+            DYNAMIC_USER_GID_MAX="${2-}"
+            GID_MAX_OVERRIDDEN=true
+            shift 2
+            parsed_arg_count=$((parsed_arg_count + 2))
+            ;;
+        --help | -h)
+            show_help
+            ;;
+        --)
+            shift
+            parsed_arg_count=$((parsed_arg_count + 1))
+            break
+            ;;
+        *)
+            usage_error
+            ;;
+        esac
+    done
+
+    COMMAND_SKIP_COUNT=$parsed_arg_count
+    validate_cli_args "$@"
+}
+
+initialize_platform_defaults() {
+    reset_derived_runtime_context
+    OS="$(uname -s)"
+    case "$OS" in
+    Linux)
+        RUNTIME_BASE="$LINUX_RUNTIME_BASE"
+        PERSIST_BASE="$LINUX_PERSIST_BASE"
+        ;;
+    FreeBSD)
+        RUNTIME_BASE="$FREEBSD_RUNTIME_BASE"
+        PERSIST_BASE="$FREEBSD_PERSIST_BASE"
+        ;;
+    *)
+        fail_fast "Unsupported OS: $OS"
+        ;;
+    esac
+
+    ROOT_GROUP="$(id -gn 0)"
+    ensure_nonsymlink_directory_exists "$RUNTIME_BASE" "Runtime base directory"
+    ensure_nonsymlink_directory_path "$PERSIST_BASE" "Persistent state base directory"
+}
+
+initialize_id_ranges() {
+    SYSTEM_UID_MIN="${DYNAMIC_USER_UID_MIN:-$DEFAULT_SYSTEM_ID_MIN}"
+    SYSTEM_UID_MAX="${DYNAMIC_USER_UID_MAX:-$DEFAULT_SYSTEM_ID_MAX}"
+    SYSTEM_GID_MIN="${DYNAMIC_USER_GID_MIN:-$DEFAULT_SYSTEM_ID_MIN}"
+    SYSTEM_GID_MAX="${DYNAMIC_USER_GID_MAX:-$DEFAULT_SYSTEM_ID_MAX}"
+
+    if [ "$OS" = "Linux" ] && [ -r /etc/login.defs ]; then
+        if [ "$UID_MIN_OVERRIDDEN" = false ]; then
+            sys_uid_min=$(awk '$1=="SYS_UID_MIN" && $2 ~ /^[0-9]+$/ { print $2; exit }' /etc/login.defs 2>/dev/null || true)
+            [ -z "$sys_uid_min" ] || SYSTEM_UID_MIN="$sys_uid_min"
+        fi
+        if [ "$UID_MAX_OVERRIDDEN" = false ]; then
+            sys_uid_max=$(awk '$1=="SYS_UID_MAX" && $2 ~ /^[0-9]+$/ { print $2; exit }' /etc/login.defs 2>/dev/null || true)
+            [ -z "$sys_uid_max" ] || SYSTEM_UID_MAX="$sys_uid_max"
+        fi
+        if [ "$GID_MIN_OVERRIDDEN" = false ]; then
+            sys_gid_min=$(awk '$1=="SYS_GID_MIN" && $2 ~ /^[0-9]+$/ { print $2; exit }' /etc/login.defs 2>/dev/null || true)
+            [ -z "$sys_gid_min" ] || SYSTEM_GID_MIN="$sys_gid_min"
+        fi
+        if [ "$GID_MAX_OVERRIDDEN" = false ]; then
+            sys_gid_max=$(awk '$1=="SYS_GID_MAX" && $2 ~ /^[0-9]+$/ { print $2; exit }' /etc/login.defs 2>/dev/null || true)
+            [ -z "$sys_gid_max" ] || SYSTEM_GID_MAX="$sys_gid_max"
+        fi
     fi
-fi
+}
 
-if [ -z "$GID" ]; then
-    for id in $(seq "$SYS_GID_MIN" "$SYS_GID_MAX"); do
-        if ! getent group "$id" >/dev/null 2>&1; then
-            GID="$id"
+initialize_service_paths() {
+    SRV_RUN="${RUNTIME_BASE}/${SERVICE}"
+    PERSIST_DIR="${PERSIST_BASE}/${SERVICE}"
+    PERSIST_ID="${PERSIST_DIR}/identity"
+    reset_existing_identity_state
+}
+
+initialize_startup_state() {
+    ACCOUNT_NAME=""
+    ACCOUNT_UID=""
+    ACCOUNT_GID=""
+    CREATED_RUNTIME_DIR=false
+    CREATED_PERSIST_DIR=false
+    IN_CLEANUP=false
+    reset_pending_failure_state
+}
+
+arm_startup_cleanup_trap() {
+    trap 'cleanup' EXIT INT TERM HUP
+}
+
+create_persist_state_directory() {
+    run_or_fail startup \
+        "create-persistent-directory" \
+        "Failed to create directory: $PERSIST_DIR" \
+        -- install -d -m 700 -o root -g "$ROOT_GROUP" "$PERSIST_DIR"
+    CREATED_PERSIST_DIR=true
+}
+
+create_runtime_state_directory() {
+    run_or_fail startup \
+        "create-runtime-directory" \
+        "Failed to create directory: $SRV_RUN" \
+        -- install -d -m 700 -o root -g "$ROOT_GROUP" "$SRV_RUN"
+    CREATED_RUNTIME_DIR=true
+}
+
+allocate_dynamic_identity() {
+    account_name_prefix=$(dynamic_account_prefix)
+    for _ in $(seq 1 "$DYNAMIC_NAME_ATTEMPTS"); do
+        dynrand=$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c "$DYNAMIC_NAME_RANDOM_LEN")
+        candidate="${account_name_prefix}${dynrand}"
+        if dynamic_account_name_available "$candidate"; then
+            ACCOUNT_NAME="$candidate"
             break
         fi
     done
-fi
 
-if [ -z "$UID" ] || [ -z "$GID" ]; then
-    echo "No free UID/GID available." >&2
-    exit 1
-fi
+    if [ -z "$ACCOUNT_NAME" ]; then
+        fail_with_mode startup \
+            "unique-dynamic-user-name-exhausted" \
+            "Unable to generate unique dynamic user name."
+    fi
 
-add_group "$GROUP" "$GID"
-CLEAN_GROUP="$GROUP"
-add_user "$USER" "$UID" "$GROUP" "$DYN_HOME"
-CLEAN_USER="$USER"
+    ACCOUNT_UID=$(first_free_getent_id passwd "$SYSTEM_UID_MIN" "$SYSTEM_UID_MAX" || true)
 
-if [ "$enable_home" = true ]; then
-    install -d -m 700 -o "$USER" -g "$GROUP" "$DYN_HOME"
-fi
+    if [ -n "$ACCOUNT_UID" ] && [ "$ACCOUNT_UID" -ge "$SYSTEM_GID_MIN" ] && [ "$ACCOUNT_UID" -le "$SYSTEM_GID_MAX" ]; then
+        if ! getent_entry_exists group "$ACCOUNT_UID"; then
+            ACCOUNT_GID="$ACCOUNT_UID"
+        fi
+    fi
 
-printf '%s:%s:%s:%s\n' "$USER" "$UID" "$GROUP" "$GID" >"$PERSIST_ID"
-chmod 600 "$PERSIST_ID"
+    if [ -z "$ACCOUNT_GID" ]; then
+        ACCOUNT_GID=$(first_free_getent_id group "$SYSTEM_GID_MIN" "$SYSTEM_GID_MAX" || true)
+    fi
 
-WORKDIR="$SRV_RUN/work"
-install -d -m 700 -o "$USER" -g "$GROUP" "$WORKDIR"
+    if [ -z "$ACCOUNT_UID" ] || [ -z "$ACCOUNT_GID" ]; then
+        fail_with_mode startup \
+            "no-free-uid-gid" \
+            "No free UID/GID available."
+    fi
+}
 
-# Finally, execute the daemon under the dynamic user
-exec chpst -u "$USER:$GROUP" -- "$@"
+create_dynamic_identity() {
+    dyn_home=$(user_account_home_path)
+    log "Creating dynamic user '$ACCOUNT_NAME' uid='$ACCOUNT_UID' gid='$ACCOUNT_GID' for service '$SERVICE'"
+    if dynamic_group_exists_by_name "$ACCOUNT_NAME"; then
+        fail_with_mode startup \
+            "dynamic-group-already-exists" \
+            "Refusing to create dynamic group '$ACCOUNT_NAME' because it already exists for service '$SERVICE'"
+    fi
+    run_or_fail startup \
+        "create-dynamic-group" \
+        "Failed to create dynamic group '$ACCOUNT_NAME' gid='$ACCOUNT_GID'" \
+        -- add_group "$ACCOUNT_NAME" "$ACCOUNT_GID"
+    if dynamic_user_exists_by_name "$ACCOUNT_NAME"; then
+        fail_with_mode startup \
+            "dynamic-user-already-exists" \
+            "Refusing to create dynamic user '$ACCOUNT_NAME' because it already exists for service '$SERVICE'"
+    fi
+    run_or_fail startup \
+        "create-dynamic-user" \
+        "Failed to create dynamic user '$ACCOUNT_NAME' uid='$ACCOUNT_UID' gid='$ACCOUNT_GID'" \
+        -- add_user "$ACCOUNT_NAME" "$ACCOUNT_UID" "$ACCOUNT_NAME" "$dyn_home"
+}
+
+create_dynamic_home_if_enabled() {
+    if ! home_creation_enabled; then
+        return 0
+    fi
+    dyn_home=$(dynamic_home_directory_path)
+    run_or_fail startup \
+        "create-home-directory" \
+        "Failed to create directory: $dyn_home" \
+        -- install -d -m 700 -o "$ACCOUNT_NAME" -g "$ACCOUNT_NAME" "$dyn_home"
+}
+
+persist_allocated_identity_state() {
+    run_or_fail startup \
+        "write-identity-file" \
+        "Failed to write identity file: $PERSIST_ID" \
+        -- write_lines_atomically \
+        "$PERSIST_ID" \
+        600 \
+        "$ACCOUNT_NAME:$ACCOUNT_UID:$ACCOUNT_NAME:$ACCOUNT_GID"
+}
+
+create_service_workdir() {
+    workdir=$(service_workdir_path)
+    run_or_fail startup \
+        "create-work-directory" \
+        "Failed to create directory: $workdir" \
+        -- install -d -m 700 -o "$ACCOUNT_NAME" -g "$ACCOUNT_NAME" "$workdir"
+}
+
+exec_service_command() {
+    workdir=$(service_workdir_path)
+    log "Executing service '$SERVICE' as '$ACCOUNT_NAME:$ACCOUNT_NAME' workdir='$workdir'"
+    exec chpst -u "$ACCOUNT_NAME:$ACCOUNT_NAME" -- "$@"
+}
+
+run_finish_main() {
+    log "Finishing dynamic user state for service '$SERVICE'"
+    run_finish_cleanup_top_level
+    release_service_lock || fail_fast "Failed to release service lock for '$SERVICE'"
+    exit 0
+}
+
+run_startup_main() {
+    shift "$COMMAND_SKIP_COUNT"
+
+    initialize_startup_state
+    arm_startup_cleanup_trap
+    handle_existing_state_for_startup
+    allocate_dynamic_identity
+    create_persist_state_directory
+    persist_allocated_identity_state
+    create_runtime_state_directory
+    create_dynamic_identity
+    create_dynamic_home_if_enabled
+    create_service_workdir
+    clear_fault_state_mode startup
+    release_service_lock || fail_with_mode startup "release-service-lock" "Failed to release service lock for '$SERVICE'"
+    exec_service_command "$@"
+}
+
+main() {
+    parse_args "$@"
+    require_root
+    initialize_platform_defaults
+    initialize_id_ranges
+    initialize_service_paths
+    acquire_service_lock
+
+    if [ "$FINISH_MODE" = true ]; then
+        run_finish_main
+    fi
+
+    run_startup_main "$@"
+}
+
+main "$@"
