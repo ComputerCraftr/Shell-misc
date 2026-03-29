@@ -1,24 +1,53 @@
 #!/bin/sh
 set -eu
 
-# Update all available packages
+SCRIPT_NAME=void-pkg-update
+XBPS_INSTALL_CMD=xbps-install
+FLATPAK_CMD=flatpak
+TORSOCKS_CMD=torsocks
+
 has_cmd() {
-    command -v "$1" >/dev/null 2>&1 && echo 1 || echo 0
+    command -v "$1" >/dev/null 2>&1
 }
 
-has_torsocks=$(has_cmd torsocks)
-has_flatpak=$(has_cmd flatpak)
-
-if [ "$has_torsocks" -eq 1 ]; then
-    torsocks xbps-install -Suy
-else
-    xbps-install -Suy
-fi
-
-if [ "$has_flatpak" -eq 1 ]; then
-    if [ "$has_torsocks" -eq 1 ]; then
-        torsocks flatpak update --noninteractive
+log() {
+    msg="$1"
+    if has_cmd logger; then
+        logger -t "$SCRIPT_NAME" "$msg"
     else
-        flatpak update --noninteractive
+        printf '%s\n' "$msg"
     fi
+}
+
+use_torsocks=0
+use_flatpak=0
+if has_cmd "$TORSOCKS_CMD"; then
+    use_torsocks=1
 fi
+if has_cmd "$FLATPAK_CMD"; then
+    use_flatpak=1
+fi
+
+log "package update start torsocks=${use_torsocks} flatpak=${use_flatpak}"
+
+if [ "$use_torsocks" -eq 1 ]; then
+    log "running xbps update via torsocks"
+    "$TORSOCKS_CMD" "$XBPS_INSTALL_CMD" -Suy
+else
+    log "running xbps update directly"
+    "$XBPS_INSTALL_CMD" -Suy
+fi
+
+if [ "$use_flatpak" -eq 1 ]; then
+    if [ "$use_torsocks" -eq 1 ]; then
+        log "running flatpak update via torsocks"
+        "$TORSOCKS_CMD" "$FLATPAK_CMD" update --noninteractive
+    else
+        log "running flatpak update directly"
+        "$FLATPAK_CMD" update --noninteractive
+    fi
+else
+    log "flatpak not found; skipping"
+fi
+
+log "package update completed"

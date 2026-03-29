@@ -5,9 +5,30 @@ has_cmd() {
     command -v "$1" >/dev/null 2>&1
 }
 
+DISCORD_ENV_CONF=/usr/local/etc/.gateway-env.conf
+DISCORD_RETRY_COUNT=5
+DISCORD_RETRY_DELAY=5
+EDAC_DETAIL_MAX_LINES=8
+MEMTEST_MIN_PERCENT=8
+MEMTEST_PERCENT_SPAN=4
+MEMTEST_ITERATIONS=2
+
 has_logger=0
 if has_cmd logger; then
     has_logger=1
+fi
+
+has_discord=0
+WEBHOOK_URL=""
+DISCORD_MENTION="@everyone"
+if [ -f "$DISCORD_ENV_CONF" ] && has_cmd curl; then
+    # shellcheck disable=SC1090
+    . "$DISCORD_ENV_CONF"
+    : "${WEBHOOK_URL:=}"
+    : "${DISCORD_MENTION:=@everyone}"
+    if [ -n "$WEBHOOK_URL" ]; then
+        has_discord=1
+    fi
 fi
 
 log() {
@@ -28,9 +49,18 @@ log_err() {
     fi
 }
 
+emit_output() {
+    input="$1"
+    if [ "$has_logger" -eq 1 ]; then
+        printf '%s\n' "$input" | logger -t memory-check
+    else
+        printf '%s\n' "$input"
+    fi
+}
+
 sanitize_log() {
     awk 'BEGIN { bs = sprintf("%c", 8) }
-        /trying mlock .*too many pages, reducing/ { next }
+        /^got .* trying mlock \.\.\.too many pages, reducing\.\.\.$/ { next }
         {
             while (match($0, "." bs)) {
                 $0 = substr($0, 1, RSTART - 1) substr($0, RSTART + 2)
@@ -40,21 +70,104 @@ sanitize_log() {
         }'
 }
 
+sanitize_text() {
+    printf '%s\n' "$1" | sanitize_log
+}
+
+log_sanitized_output() {
+    emit_output "$(sanitize_text "$1")"
+}
+
 rand_u16() {
     od -An -N2 -tu2 /dev/urandom | tr -d ' '
 }
 
+json_escape() {
+    printf '%s' "$1" | awk 'BEGIN { ORS = "" }
+        {
+            gsub(/\\/, "\\\\")
+            gsub(/"/, "\\\"")
+            gsub(/\r/, "")
+            if (NR > 1) {
+                printf "\\n"
+            }
+            printf "%s", $0
+        }'
+}
+
+send_discord() {
+    msg="$1"
+    if [ "$has_discord" -ne 1 ]; then
+        return
+    fi
+    payload=$(json_escape "${DISCORD_MENTION} ${msg}")
+    curl -s --retry "$DISCORD_RETRY_COUNT" --retry-delay "$DISCORD_RETRY_DELAY" -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"content\": \"${payload}\"}" \
+        "$WEBHOOK_URL" >/dev/null || log_err "discord notification failed"
+}
+
+run_memtester() {
+    if [ "$has_logger" -eq 1 ]; then
+        if memtester_output=$(memtester "${size_kb}K" "$iterations" 2>&1); then
+            memtester_status=0
+        else
+            memtester_status=$?
+        fi
+        log_sanitized_output "$memtester_output"
+        return
+    fi
+
+    if memtester "${size_kb}K" "$iterations"; then
+        memtester_status=0
+    else
+        memtester_status=$?
+    fi
+}
+
+memtester_status=""
+edac_status=""
+edac_discord_detail=""
+size_kb=""
+iterations=""
+os_name=""
 logged_exit=0
 on_exit() {
     rc=$1
     if [ "$logged_exit" -eq 1 ]; then
         return
-    elif [ "$rc" -ne 0 ]; then
-        log_err "memory-check failed status=$rc"
-    else
-        log "memory-check succeeded status=$rc"
     fi
     logged_exit=1
+
+    status_word="ok"
+    if [ "$rc" -ne 0 ]; then
+        status_word="fail"
+    fi
+
+    discord_message="\`$(date)\` memory-check ${status_word}"
+    if [ -n "$os_name" ]; then
+        discord_message="${discord_message} \`${os_name}\`"
+    fi
+    if [ -n "$size_kb" ] && [ -n "$iterations" ]; then
+        discord_message="${discord_message} ${size_kb}K x${iterations}"
+    fi
+    if [ -n "$memtester_status" ]; then
+        discord_message="${discord_message} mem=${memtester_status}"
+    fi
+    if [ -n "$edac_status" ]; then
+        discord_message="${discord_message} edac=${edac_status}"
+    fi
+    if [ -n "$edac_discord_detail" ]; then
+        discord_message="${discord_message}
+edac detail:\`\`\`${edac_discord_detail}\`\`\`"
+    fi
+    if [ "$rc" -ne 0 ]; then
+        log_err "memory-check failed status=$rc"
+        send_discord "${discord_message} rc=${rc}"
+    else
+        log "memory-check succeeded status=$rc"
+        send_discord "${discord_message} rc=${rc}"
+    fi
 }
 trap 'on_exit $?' EXIT INT TERM HUP
 
@@ -64,7 +177,6 @@ if ! has_cmd memtester; then
 fi
 
 os_name=$(uname -s)
-total_kb=""
 
 case "$os_name" in
 FreeBSD)
@@ -88,26 +200,17 @@ esac
 
 # 8% to 12% of RAM
 rand_u16_val=$(rand_u16)
-size_kb=$(((total_kb * (8 * 65535 + 4 * rand_u16_val)) / (100 * 65535)))
+size_kb=$(((total_kb * (MEMTEST_MIN_PERCENT * 65535 + MEMTEST_PERCENT_SPAN * rand_u16_val)) / (100 * 65535)))
 if [ "$size_kb" -lt 1 ]; then
     size_kb=1
 fi
 
 # 1 to 2 iterations
 rand_iter_val=$(rand_u16)
-iterations=$(((rand_iter_val % 2) + 1))
+iterations=$(((rand_iter_val % MEMTEST_ITERATIONS) + 1))
 
 log "memtester start size=${size_kb}K passes=${iterations} os=${os_name}"
-set +e
-if [ "$has_logger" -eq 1 ]; then
-    memtester_output=$(memtester "${size_kb}K" "$iterations" 2>&1)
-    memtester_status=$?
-    printf '%s\n' "$memtester_output" | sanitize_log | logger -t memory-check
-else
-    memtester "${size_kb}K" "$iterations"
-    memtester_status=$?
-fi
-set -e
+run_memtester
 log "memtester exit status=${memtester_status}"
 overall_status=$memtester_status
 
@@ -122,17 +225,15 @@ if has_cmd edac-util; then
 
     edac_status=0
     if [ "$edac_has_errors" -eq 1 ]; then
-        if [ "$has_logger" -eq 1 ]; then
-            printf '%s\n' "$edac_output" | sanitize_log | logger -t memory-check
-        else
-            printf '%s\n' "$edac_output" | sanitize_log
-        fi
+        edac_sanitized_output=$(sanitize_text "$edac_output")
+        emit_output "$edac_sanitized_output"
+        edac_discord_detail=$(printf '%s\n' "$edac_sanitized_output" | sed -n "1,${EDAC_DETAIL_MAX_LINES}p")
         edac_status=1
     else
         log "edac-util: no errors"
     fi
     log "edac-util exit status=${edac_status}"
-    if [ "$overall_status" -eq 0 ]; then
+    if [ "$edac_status" -gt "$overall_status" ]; then
         overall_status=$edac_status
     fi
 else

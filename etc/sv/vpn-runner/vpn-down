@@ -2,6 +2,8 @@
 set -eu
 
 SCRIPT_NAME=vpn-down
+RESOLV_CONF_BACKUP=/etc/resolv.conf.bak
+ACTIVE_RESOLV_CONF=/etc/resolv.conf
 
 # Define logging wrapper functions.
 log() { logger -t "$SCRIPT_NAME" -p daemon.notice "$*"; }
@@ -13,7 +15,11 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-if [ -f /etc/resolv.conf.bak ]; then
-    cp /etc/resolv.conf.bak /etc/resolv.conf
+log "Starting VPN teardown"
+
+if [ -f "$RESOLV_CONF_BACKUP" ]; then
+    cp "$RESOLV_CONF_BACKUP" "$ACTIVE_RESOLV_CONF"
     log "Restored resolv.conf to default."
+else
+    log "No backup resolv.conf found at '$RESOLV_CONF_BACKUP'; leaving resolv.conf unchanged."
 fi

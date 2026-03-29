@@ -2,13 +2,20 @@
 set -eu
 
 SCRIPT_NAME=vpn-runner
+ENV_CONF=/usr/local/etc/.gateway-env.conf
+STARTUP_DELAY=10
+DHCLIENT_SERVICE=dhclient
+OPENVPN_PID_FILE=/var/run/openvpn.pid
+OPENVPN_SYSLOG_TAG=openvpn
+PROXY_PROBE_TIMEOUT=5
+PROXY_PROBE_PORT=5201
 
 # Define logging wrapper functions.
 log() { logger -t "$SCRIPT_NAME" -p daemon.notice "$*"; }
 log_err() { logger -t "$SCRIPT_NAME" -p daemon.err "$*"; }
 
 # Delay startup to ensure network is settled.
-sleep 10
+sleep "$STARTUP_DELAY"
 
 # Ensure the script is run as root.
 if [ "$(id -u)" -ne 0 ]; then
@@ -17,7 +24,8 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # Load environment variables from /usr/local/etc/.gateway-env.conf config file.
-. /usr/local/etc/.gateway-env.conf
+# shellcheck disable=SC1090
+. "$ENV_CONF"
 
 # Configuration: timeouts, intervals, and retry settings.
 OVPN_PROXY_PORT=$(tail -n 1 "${OVPN_PROXY_AUTH:-}" 2>/dev/null || echo 0)
@@ -26,6 +34,7 @@ INTERVAL=1         # Polling interval in seconds.
 
 # Get current default gateway interface.
 EXT_IF_CUR=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $4; exit}')
+log "Current default interface='${EXT_IF_CUR:-none}' candidates='${EXT_IF_LIST}'"
 
 # Build a newline-separated list of candidates, filtering out the current default.
 CANDIDATE_LINES=$(echo "$EXT_IF_LIST" | tr ',' '\n' | grep -Fvx "$EXT_IF_CUR")
@@ -46,6 +55,7 @@ while [ -n "$CANDIDATE_LINES" ]; do
 
     # Grab exactly that line.
     EXT_IF_NEW=$(echo "$CANDIDATE_LINES" | sed -n "${INDEX}p")
+    log "Trying candidate interface '$EXT_IF_NEW' index=$INDEX"
 
     remove_current() {
         CANDIDATE_LINES=$(echo "$CANDIDATE_LINES" | sed "${INDEX}d")
@@ -54,16 +64,19 @@ while [ -n "$CANDIDATE_LINES" ]; do
     # Verify the specified interface exists.
     EXT_IF_AVAILABLE=$([ -n "$EXT_IF_NEW" ] && ifconfig "$EXT_IF_NEW" >/dev/null 2>&1 && echo 1 || echo 0)
     if [ "$EXT_IF_AVAILABLE" -ne 1 ]; then
+        log_err "Interface '$EXT_IF_NEW' is not available; trying another interface."
         remove_current
         continue
     fi
 
     # Delete existing default routes for IPv4 and IPv6.
+    log "Clearing existing default routes before DHCP on '$EXT_IF_NEW'"
     route -n delete -inet default || true
     route -n delete -inet6 default || true
 
     # Restart the DHCP client service on the interface.
-    if ! service dhclient restart "$EXT_IF_NEW"; then
+    log "Restarting dhclient on '$EXT_IF_NEW'"
+    if ! service "$DHCLIENT_SERVICE" restart "$EXT_IF_NEW"; then
         log_err "DHCP restart failed on $EXT_IF_NEW; trying another interface."
         remove_current
         continue
@@ -88,6 +101,8 @@ while [ -n "$CANDIDATE_LINES" ]; do
         continue
     fi
 
+    log "Selected interface '$EXT_IF_NEW' with default gateway '$DEFAULT_GW_IPV4'"
+
     # Break out of the loop now that the interface is up.
     break
 done
@@ -97,9 +112,12 @@ if [ -z "$DEFAULT_GW_IPV4" ]; then
     exit 1
 fi
 
-if ! timeout 5 nc -z -4 "$DEFAULT_GW_IPV4" 5201 >/dev/null 2>&1; then
+if ! timeout "$PROXY_PROBE_TIMEOUT" nc -z -4 "$DEFAULT_GW_IPV4" "$PROXY_PROBE_PORT" >/dev/null 2>&1; then
     # Connect directly to the server.
     OVPN_PROXY_PORT=0
+    log "Proxy port probe failed for gateway '$DEFAULT_GW_IPV4'; using direct OpenVPN connection"
+else
+    log "Proxy port probe succeeded for gateway '$DEFAULT_GW_IPV4' port='$OVPN_PROXY_PORT'"
 fi
 
 # Update the OpenVPN configuration.
@@ -109,18 +127,22 @@ if [ "$EXT_IF_AVAILABLE" -eq 1 ] && [ -f "${OVPN_PROXY_AUTH:-}" ] &&
         -e "s|__PROXY_STRING__|${DEFAULT_GW_IPV4} ${OVPN_PROXY_PORT}|" \
         -e "s|__PROXY_AUTH_FILE__|$OVPN_PROXY_AUTH|" \
         "$OVPN_TEMPLATE" >"$OVPN_FILE"
+    log "Wrote OpenVPN config '$OVPN_FILE' using proxy '$DEFAULT_GW_IPV4:$OVPN_PROXY_PORT'"
 else
     sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
         -e "/__PROXY_STRING__/d" \
         -e "/__PROXY_AUTH_FILE__/d" \
         "$OVPN_TEMPLATE" >"$OVPN_FILE"
+    log "Wrote OpenVPN config '$OVPN_FILE' without proxy"
 fi
 
 # Start the OpenVPN service with elevated priority to reduce latency.
 if command -v rtprio >/dev/null 2>&1; then
     # Realtime class priority 10 (0 highest).
-    exec rtprio 10 openvpn --syslog openvpn --config "$OVPN_FILE" --writepid /var/run/openvpn.pid
+    log "Starting OpenVPN with rtprio priority 10 using config '$OVPN_FILE'"
+    exec rtprio 10 openvpn --syslog "$OPENVPN_SYSLOG_TAG" --config "$OVPN_FILE" --writepid "$OPENVPN_PID_FILE"
 else
     # Fallback to highest nice if rtprio is unavailable.
-    exec nice -n -20 openvpn --syslog openvpn --config "$OVPN_FILE" --writepid /var/run/openvpn.pid
+    log "Starting OpenVPN with nice -20 using config '$OVPN_FILE'"
+    exec nice -n -20 openvpn --syslog "$OPENVPN_SYSLOG_TAG" --config "$OVPN_FILE" --writepid "$OPENVPN_PID_FILE"
 fi

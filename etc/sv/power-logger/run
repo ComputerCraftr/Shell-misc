@@ -10,22 +10,55 @@
 #   pw useradd -n power-logger -g power-logger -c "power logger service" -s /usr/sbin/nologin -d /nonexistent -w no || true
 #   install -d -o power-logger -g power-logger /var/db/power-logger
 #   install -d -o root -g power-logger -m 755 /etc/sv/power-logger/env
+#   install -o root -g power-logger -m 640 /dev/null /etc/sv/power-logger/env/.env.power-logger
 #   cat > /etc/sv/power-logger/env/.env.power-logger <<'EOF'
 #   SERVICE_USER=power-logger
 #   RING_BUFFER_DAYS=30
 #   INTERVAL_SEC=1
 #   DB_TYPE=sqlite
 #   EOF
-#   chmod o= /etc/sv/power-logger/env/.env.power-logger
-#   chown -R root:power-logger /etc/sv/power-logger
 #
 # If using PostgreSQL, also set PGHOST, PGPORT, PGDATABASE, PGUSER in the .env file.
 # -------------------------------------------------------------
 # Enable service: ln -s /etc/sv/power-logger /var/service/
 set -eu
 
+SCRIPT_NAME=power-logger
+
+has_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+log() {
+    msg="$1"
+    if has_cmd logger; then
+        logger -t "$SCRIPT_NAME" -p daemon.notice "$msg"
+    else
+        printf '%s\n' "$msg" >&2
+    fi
+}
+
+log_warn() {
+    msg="$1"
+    if has_cmd logger; then
+        logger -t "$SCRIPT_NAME" -p daemon.warning "$msg"
+    else
+        printf '%s\n' "$msg" >&2
+    fi
+}
+
+log_err() {
+    msg="$1"
+    if has_cmd logger; then
+        logger -t "$SCRIPT_NAME" -p daemon.err "$msg"
+    else
+        printf '%s\n' "$msg" >&2
+    fi
+}
+
 # Load environment
 ENV_DIR="$(dirname "$0")/env"
+# shellcheck disable=SC1091
 [ -f "$ENV_DIR/.env.power-logger" ] && . "$ENV_DIR/.env.power-logger"
 
 # Defaults
@@ -46,16 +79,17 @@ ENV_DIR="$(dirname "$0")/env"
 
 # Drop privileges if needed
 if [ "$(id -un)" != "$SERVICE_USER" ]; then
+    log "Dropping privileges to '$SERVICE_USER'"
     exec chpst -u "$SERVICE_USER" /bin/sh "$0" "$@"
 fi
 
 case "$INTERVAL_SEC" in
 '' | *[!0-9]*)
-    echo "[power-logger] ERROR: INTERVAL_SEC must be a positive integer." >&2
+    log_err "INTERVAL_SEC must be a positive integer."
     exit 1
     ;;
 0)
-    echo "[power-logger] ERROR: INTERVAL_SEC must be greater than zero." >&2
+    log_err "INTERVAL_SEC must be greater than zero."
     exit 1
     ;;
 esac
@@ -102,13 +136,14 @@ postgres)
     CLIENT_CMD="psql -qAt -h '$PGHOST' -p '$PGPORT' -U '$PGUSER' -d '$PGDATABASE'"
     ;;
 *)
-    echo "[power-logger] ERROR: unsupported DB_TYPE='$DB_TYPE'" >&2
+    log_err "unsupported DB_TYPE='$DB_TYPE'"
     exit 1
     ;;
 esac
 
 # Initialize schema
 echo "$INIT_SCHEMA_SQL" | sed "$SED_SCHEMA" | eval "$CLIENT_CMD"
+log "Initialized power logger source='$POWER_SOURCE' db_type='$DB_TYPE' interval='$INTERVAL_SEC' ring_buffer_size='$RING_BUFFER_SIZE'"
 
 # Determine starting slot
 last_slot=$(echo "$SELECT_LAST_SLOT" | eval "$CLIENT_CMD")
@@ -138,10 +173,11 @@ apc)
         NOMPOWER=$(apcaccess_value NOMPOWER 2>/dev/null || true)
         case "$NOMPOWER" in
         '' | *[!0-9.]*)
-            echo "[power-logger] WARN: invalid NOMPOWER='$NOMPOWER'. Retrying..." >&2
+            log_warn "invalid NOMPOWER='$NOMPOWER'. Retrying..."
             sleep 5
             ;;
         *)
+            log "Using APC nominal power '$NOMPOWER'"
             break
             ;;
         esac
@@ -149,7 +185,7 @@ apc)
     ;;
 ipmi) ;;
 *)
-    echo "[power-logger] ERROR: unsupported POWER_SOURCE='$POWER_SOURCE'" >&2
+    log_err "unsupported POWER_SOURCE='$POWER_SOURCE'"
     exit 1
     ;;
 esac
@@ -168,7 +204,7 @@ while :; do
         LOADPCT=$(apcaccess_value LOADPCT 2>/dev/null || true)
         case "$LOADPCT" in
         '' | *[!0-9.]*)
-            echo "[power-logger] WARN: invalid LOADPCT='$LOADPCT'." >&2
+            log_warn "invalid LOADPCT='$LOADPCT'"
             continue
             ;;
         esac
@@ -182,7 +218,7 @@ while :; do
 
     case "$WATTS" in
     '' | *[!0-9.]*)
-        echo "[power-logger] WARN: invalid watts='$WATTS'." >&2
+        log_warn "invalid watts='$WATTS'"
         continue
         ;;
     esac

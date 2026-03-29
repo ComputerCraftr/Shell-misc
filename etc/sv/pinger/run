@@ -10,22 +10,46 @@
 #   pw useradd -n pinger -g pinger -c "pinger service" -s /usr/sbin/nologin -d /nonexistent -w no || true
 #   install -d -o pinger -g pinger /var/db/pinger
 #   install -d -o root -g pinger -m 755 /etc/sv/pinger/env
+#   install -o root -g pinger -m 640 /dev/null /etc/sv/pinger/env/.env.pinger
 #   cat > /etc/sv/pinger/env/.env.pinger <<'EOF'
 #   SERVICE_USER=pinger
 #   RING_BUFFER_DAYS=30
 #   TARGET=2001:470:20::2
 #   DB_TYPE=sqlite
 #   EOF
-#   chmod o= /etc/sv/pinger/env/.env.pinger
-#   chown -R root:pinger /etc/sv/pinger
 #
 # If using PostgreSQL, also set PGHOST, PGPORT, PGDATABASE, PGUSER in the .env file.
 # -------------------------------------------------------------
 # Enable service: ln -s /etc/sv/pinger /var/service/
 set -eu
 
+SCRIPT_NAME=pinger
+
+has_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+log() {
+    msg="$1"
+    if has_cmd logger; then
+        logger -t "$SCRIPT_NAME" -p daemon.notice "$msg"
+    else
+        printf '%s\n' "$msg" >&2
+    fi
+}
+
+log_err() {
+    msg="$1"
+    if has_cmd logger; then
+        logger -t "$SCRIPT_NAME" -p daemon.err "$msg"
+    else
+        printf '%s\n' "$msg" >&2
+    fi
+}
+
 # Load environment
 ENV_DIR="$(dirname "$0")/env"
+# shellcheck disable=SC1091
 [ -f "$ENV_DIR/.env.pinger" ] && . "$ENV_DIR/.env.pinger"
 
 # Defaults
@@ -41,6 +65,7 @@ ENV_DIR="$(dirname "$0")/env"
 
 # Drop privileges if needed
 if [ "$(id -un)" != "$SERVICE_USER" ]; then
+    log "Dropping privileges to '$SERVICE_USER'"
     exec chpst -u "$SERVICE_USER" /bin/sh "$0" "$@"
 fi
 
@@ -83,13 +108,14 @@ postgres)
     CLIENT_CMD="psql -qAt -h '$PGHOST' -p '$PGPORT' -U '$PGUSER' -d '$PGDATABASE'"
     ;;
 *)
-    echo "[pinger] ERROR: unsupported DB_TYPE='$DB_TYPE'" >&2
+    log_err "unsupported DB_TYPE='$DB_TYPE'"
     exit 1
     ;;
 esac
 
 # Initialize schema
 echo "$INIT_SCHEMA_SQL" | sed "$SED_SCHEMA" | eval "$CLIENT_CMD"
+log "Initialized pinger target='$TARGET' db_type='$DB_TYPE' ring_buffer_days='$RING_BUFFER_DAYS' ring_buffer_size='$RING_BUFFER_SIZE'"
 
 # Determine starting slot
 last_slot=$(echo "$SELECT_LAST_SLOT" | eval "$CLIENT_CMD")
@@ -100,6 +126,7 @@ esac
 
 # Startup delay to ensure unique integer-second timestamps
 sleep 1
+target_reachable=1
 
 # Main loop: keep a strict 1 Hz cadence aligned to wall-clock seconds
 while :; do
@@ -115,9 +142,18 @@ while :; do
     rtt=$(ping6 -c 1 -W 1 -q "$TARGET" 2>/dev/null | awk -F/ '/[Mm]in\/avg\/max/ {print $5; exit}')
 
     if [ -n "$rtt" ]; then
+        if [ "$target_reachable" -ne 1 ]; then
+            log "target '$TARGET' recovered"
+            target_reachable=1
+        fi
         SQL=$(echo "$UPSERT_SQL" |
             sed "s/%SLOT%/$slot/; s/%RTT%/$rtt/")
         echo "$SQL" | eval "$CLIENT_CMD"
         slot=$(((slot + 1) % RING_BUFFER_SIZE))
+    else
+        if [ "$target_reachable" -eq 1 ]; then
+            log_err "target '$TARGET' became unreachable"
+            target_reachable=0
+        fi
     fi
 done

@@ -2,6 +2,15 @@
 set -eu
 
 SCRIPT_NAME=vpn-up
+VPN_RESOLV_CONF=/etc/resolv.conf.vpn
+ACTIVE_RESOLV_CONF=/etc/resolv.conf
+ENV_CONF=/usr/local/etc/.gateway-env.conf
+LOCK_DIR=/var/run
+IPFW_SERVICE=ipfw
+EXTERNAL_IP_URL=https://ifconfig.co
+DISCORD_RETRY_COUNT=5
+DISCORD_RETRY_DELAY=5
+DISCORD_IP_FAMILY=-4
 
 # Define logging wrapper functions.
 log() { logger -t "$SCRIPT_NAME" -p daemon.notice "$*"; }
@@ -13,13 +22,14 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-if [ -f /etc/resolv.conf.vpn ]; then
-    cp /etc/resolv.conf.vpn /etc/resolv.conf
+if [ -f "$VPN_RESOLV_CONF" ]; then
+    cp "$VPN_RESOLV_CONF" "$ACTIVE_RESOLV_CONF"
     log "Configured resolv.conf for VPN."
 fi
 
 # Load environment variables from /usr/local/etc/.gateway-env.conf config file.
-. /usr/local/etc/.gateway-env.conf
+# shellcheck disable=SC1090
+. "$ENV_CONF"
 
 # Configuration: timeouts, intervals, and retry settings.
 TUN_IF=$(awk '/dev / {print $2; exit}' <"$OVPN_TEMPLATE")
@@ -28,7 +38,7 @@ GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
 
 # Ensure single instance using a simple PID-based lockfile.
-LOCKFILE="/var/run/${SCRIPT_NAME}.${TUN_IF}.lock"
+LOCKFILE="${LOCK_DIR}/${SCRIPT_NAME}.${TUN_IF}.lock"
 if [ -e "$LOCKFILE" ]; then
     OLDPID=$(cat "$LOCKFILE" 2>/dev/null || echo "")
     if [ -n "$OLDPID" ] && kill -0 "$OLDPID" 2>/dev/null; then
@@ -45,14 +55,38 @@ trap 'rm -f "$LOCKFILE"' EXIT INT TERM HUP
 # Restart ipfw if we need to detect and apply rules on a new interface.
 if { [ -n "$GIF_IF" ] && ! ipfw list | grep -qwF "$GIF_IF"; } ||
     ! ipfw list | grep -qwF "$TUN_IF"; then
-    service ipfw restart
+    service "$IPFW_SERVICE" restart
 fi
 
 # Set defaults for the Discord notification if not defined.
 : "${DISCORD_MENTION:=@everyone}"
 
-# Build the message string.
-DISCORD_MESSAGE="\`$(date)\` - "
+json_escape() {
+    printf '%s' "$1" | awk 'BEGIN { ORS = "" }
+        {
+            gsub(/\\/, "\\\\")
+            gsub(/"/, "\\\"")
+            gsub(/\r/, "")
+            if (NR > 1) {
+                printf "\\n"
+            }
+            printf "%s", $0
+        }'
+}
+
+send_discord() {
+    msg="$1"
+    payload=$(json_escape "${DISCORD_MENTION} ${msg}")
+    log "Sending Discord notification with the following message: $msg"
+    curl -s --retry "$DISCORD_RETRY_COUNT" --retry-delay "$DISCORD_RETRY_DELAY" \
+        "$DISCORD_IP_FAMILY" -X POST -H "Content-Type: application/json" \
+        -d "{\"content\": \"${payload}\"}" \
+        "$WEBHOOK_URL"
+    log "Notification sent successfully."
+}
+
+DEFAULT_GW_IPV4_LINE=""
+DEFAULT_GW_IPV6_LINE=""
 
 # Poll for default gateways for IPv4 and IPv6 (using netstat).
 SECONDS_WAITED=0
@@ -79,10 +113,12 @@ if [ -z "$DEFAULT_GW_IPV4" ]; then
     false
 fi
 
-# Build the default gateway information string.
-DISCORD_MESSAGE="${DISCORD_MESSAGE}\`${DEFAULT_IF_IPV4}\` Discovered default gateway(s):"
-[ -n "$DEFAULT_GW_IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV4\`\`\`"
-[ -n "$DEFAULT_GW_IPV6" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}\`\`\`$DEFAULT_GW_IPV6\`\`\`"
+log "Discovered default gateway IPv4='$DEFAULT_GW_IPV4' interface='$DEFAULT_IF_IPV4' IPv6='${DEFAULT_GW_IPV6:-}'"
+
+DISCORD_SUMMARY="\`$(date)\` VPN up on \`${TUN_IF}\`"
+[ -n "$DEFAULT_IF_IPV4" ] && DISCORD_SUMMARY="${DISCORD_SUMMARY} via \`${DEFAULT_IF_IPV4}\`"
+[ -n "$DEFAULT_GW_IPV4" ] && DEFAULT_GW_IPV4_LINE="gw4: \`${DEFAULT_GW_IPV4}\`"
+[ -n "$DEFAULT_GW_IPV6" ] && DEFAULT_GW_IPV6_LINE="gw6: \`${DEFAULT_GW_IPV6}\`"
 
 # Poll for an IPv4 address on the tunnel interface.
 SECONDS_WAITED=0
@@ -105,6 +141,8 @@ if [ -z "$TUN_IPV4" ]; then
     false
 fi
 
+log "Tunnel interface '$TUN_IF' acquired IPv4 '$TUN_IPV4'"
+
 # Define reusable octet for 0–255
 OCTET='(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})'
 
@@ -125,7 +163,7 @@ BAD_IPV4_REGEX="^(""\
 )\$"
 
 # Get external IPv4 address
-EXT_IPV4=$(curl -s --retry 5 --retry-delay 5 -4 https://ifconfig.co)
+EXT_IPV4=$(curl -s --retry 5 --retry-delay 5 -4 "$EXTERNAL_IP_URL")
 
 # Check for invalid/missing/bad external IP
 if [ -z "$EXT_IPV4" ] ||
@@ -134,7 +172,7 @@ if [ -z "$EXT_IPV4" ] ||
     log_err "Error: External IP is not usable: '$EXT_IPV4'"
     EXT_IPV4=""
 else
-    DISCORD_MESSAGE="${DISCORD_MESSAGE}Acquired external IP:\`\`\`$EXT_IPV4\`\`\`"
+    log "Validated external IPv4 '$EXT_IPV4'"
 fi
 
 GOOD_IPV4_REGEX=$(echo "^(good|nochg) $EXT_IPV4$" | sed 's/\./\\./g')
@@ -146,6 +184,7 @@ if [ -n "$EXT_IPV4" ] && [ -n "$GIF_IF" ] && [ -n "$INT_IF" ] && [ -n "$GIF_UPDA
     EXT_IPV4_UPDATE=$(curl -s --retry 5 --retry-delay 5 -4 -X GET \
         -H "Cache-Control: no-cache, no-store, must-revalidate" \
         "$GIF_UPDATE_URL&myip=$EXT_IPV4")
+    log "6in4 update response: '$EXT_IPV4_UPDATE'"
 fi
 
 if echo "$EXT_IPV4_UPDATE" | grep -qE "$GOOD_IPV4_REGEX"; then
@@ -160,7 +199,7 @@ if echo "$EXT_IPV4_UPDATE" | grep -qE "$GOOD_IPV4_REGEX"; then
     # Set the default IPv6 route.
     route -n add -inet6 default "$GIF_IPV6_SERVER"
 
-    log "Updated external IP: '$EXT_IPV4_UPDATE'"
+    log "Configured 6in4 gif_if='$GIF_IF' int_if='$INT_IF' mtu='$GIF_MTU' update='$EXT_IPV4_UPDATE'"
 else
     if [ -n "$INT_IF" ]; then
         ifconfig "$INT_IF" inet6 "$GIF_IPV6_LOCAL" prefixlen 64 delete || true
@@ -168,14 +207,25 @@ else
 
     if [ -n "$EXT_IPV4_UPDATE" ]; then
         log_err "Error: Failed to update external IP: '$EXT_IPV4_UPDATE'"
+    else
+        log "6in4 not configured; missing usable external IP or tunnel settings"
     fi
-    DISCORD_MESSAGE="${DISCORD_MESSAGE}External IP is not usable."
 fi
 
-# Send the Discord notification.
-log "Sending Discord notification with the following message: $DISCORD_MESSAGE"
-curl -s --retry 5 --retry-delay 5 -4 -X POST -H "Content-Type: application/json" \
-    -d "{\"content\": \"${DISCORD_MENTION} ${DISCORD_MESSAGE}\"}" \
-    "$WEBHOOK_URL"
-
-log "Notification sent successfully."
+DISCORD_MESSAGE="$DISCORD_SUMMARY"
+[ -n "$TUN_IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}
+ip4: \`${TUN_IPV4}\`"
+[ -n "$EXT_IPV4" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}
+ext4: \`${EXT_IPV4}\`"
+[ -n "$DEFAULT_GW_IPV4_LINE" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}
+${DEFAULT_GW_IPV4_LINE}"
+[ -n "$DEFAULT_GW_IPV6_LINE" ] && DISCORD_MESSAGE="${DISCORD_MESSAGE}
+${DEFAULT_GW_IPV6_LINE}"
+if [ -n "$EXT_IPV4" ] && echo "$EXT_IPV4_UPDATE" | grep -qE "$GOOD_IPV4_REGEX"; then
+    DISCORD_MESSAGE="${DISCORD_MESSAGE}
+6in4: updated"
+else
+    DISCORD_MESSAGE="${DISCORD_MESSAGE}
+6in4: unavailable"
+fi
+send_discord "$DISCORD_MESSAGE"

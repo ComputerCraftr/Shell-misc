@@ -5,12 +5,38 @@
 #   ZRAM_PERCENT=12 ZRAM_MAX_MB=8192 ZRAM_ALGO=zstd
 set -eu
 
+SCRIPT_NAME=init-zram
+
+has_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+log() {
+    msg="$1"
+    if has_cmd logger; then
+        logger -t "$SCRIPT_NAME" -p daemon.notice "$msg"
+    else
+        printf '%s\n' "$msg" >&2
+    fi
+}
+
+log_err() {
+    msg="$1"
+    if has_cmd logger; then
+        logger -t "$SCRIPT_NAME" -p daemon.err "$msg"
+    else
+        printf '%s\n' "$msg" >&2
+    fi
+}
+
 : "${ZRAM_PERCENT:=30}"  # percent of total RAM to use
 : "${ZRAM_MAX_MB:=8192}" # cap in MB (default 8 GB)
+: "${ZRAM_ALGO:=}"       # optional compression algorithm
 ZRAM_DEV=/dev/zram0      # device
 
 # If already active swap on this device, do nothing.
 if swapon --show=NAME | awk -v d="$ZRAM_DEV" '$1==d{found=1} END{exit !found}'; then
+    log "ZRAM swap already active on '$ZRAM_DEV'; skipping"
     exit 0
 fi
 
@@ -19,7 +45,7 @@ ram_kb=$(awk '/MemTotal/ {print $2; exit}' /proc/meminfo)
 # Compute size MB = MemTotal * percent / (100 * 1024)
 zram_mb=$((ram_kb * ZRAM_PERCENT / (100 * 1024)))
 if [ "$zram_mb" -le 0 ]; then
-    echo "ERROR: computed zram size is $zram_mb MB" >&2
+    log_err "ERROR: computed zram size is $zram_mb MB"
     exit 1
 fi
 
@@ -35,7 +61,7 @@ devbase=$(basename "$ZRAM_DEV")
 sysdir="/sys/block/$devbase"
 
 if [ ! -d "$sysdir" ]; then
-    echo "ERROR: $sysdir not present (zram device not available?)" >&2
+    log_err "ERROR: $sysdir not present (zram device not available?)"
     exit 1
 fi
 
@@ -45,19 +71,23 @@ if [ -w "$sysdir/reset" ]; then
 fi
 
 # Set algorithm if requested and supported
-if [ -n "${ZRAM_ALGO:-}" ] && [ -w "$sysdir/comp_algorithm" ]; then
+if [ -n "$ZRAM_ALGO" ] && [ -w "$sysdir/comp_algorithm" ]; then
     echo "$ZRAM_ALGO" >"$sysdir/comp_algorithm" || true
 fi
+
+log "Configuring zram device='$ZRAM_DEV' size='${zram_mb}M' algo='${ZRAM_ALGO:-default}'"
 
 # Set size, format, enable
 echo "${zram_mb}M" >"$sysdir/disksize"
 
 mkswap "$ZRAM_DEV" >/dev/null 2>&1 || {
-    echo "ERROR: mkswap failed on $ZRAM_DEV" >&2
+    log_err "ERROR: mkswap failed on $ZRAM_DEV"
     exit 1
 }
 
 swapon "$ZRAM_DEV" || {
-    echo "ERROR: swapon failed on $ZRAM_DEV" >&2
+    log_err "ERROR: swapon failed on $ZRAM_DEV"
     exit 1
 }
+
+log "Enabled zram swap on '$ZRAM_DEV' size='${zram_mb}M'"

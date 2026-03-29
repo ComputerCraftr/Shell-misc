@@ -3,4 +3,18 @@
 PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin"
 export PATH
 
+has_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+log() {
+    msg="$1"
+    if has_cmd logger; then
+        logger -t iperf3 -p daemon.notice "$msg"
+    else
+        printf '%s\n' "$msg" >&2
+    fi
+}
+
+log "Finishing iperf3 runit service"
 exec run-dynamic-user --finish --service iperf3

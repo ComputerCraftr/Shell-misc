@@ -1,2 +1,6 @@
 #!/bin/sh
-nohup /etc/sv/vpn-runner/vpn-up &
+SCRIPT_NAME=vpn-up-helper
+VPN_UP_SCRIPT=/etc/sv/vpn-runner/vpn-up
+
+logger -t "$SCRIPT_NAME" -p daemon.notice "Spawning vpn-up helper"
+nohup "$VPN_UP_SCRIPT" &

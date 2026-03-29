@@ -1,3 +1,19 @@
 #!/bin/sh
-# Foreground btrfs root scrub
-btrfs scrub start -Bd /
+set -eu
+
+SCRIPT_NAME=btrfs-scrub
+BTRFS_CMD=btrfs
+SCRUB_TARGET=/
+
+log() {
+    msg="$1"
+    if command -v logger >/dev/null 2>&1; then
+        logger -t "$SCRIPT_NAME" "$msg"
+    else
+        printf '%s\n' "$msg"
+    fi
+}
+
+log "btrfs scrub start target=${SCRUB_TARGET}"
+"$BTRFS_CMD" scrub start -Bd "$SCRUB_TARGET"
+log "btrfs scrub completed target=${SCRUB_TARGET}"

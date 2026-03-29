@@ -21,4 +21,5 @@ if [ -f ./env/BIND_PORT ]; then
     fi
 fi
 
+printf '%s\n' "[termux:socat-tcp] listening on ${PORT} forwarding to ${TARGET}" >&2
 exec nice -n -20 socat TCP-LISTEN:"$PORT","$SOCAT_OPTS" TCP:"$TARGET"
