@@ -24,7 +24,9 @@
 set -eu
 
 SCRIPT_NAME=pinger
+DATE_EPOCH_MODE=""
 
+# Helpers
 has_cmd() {
     command -v "$1" >/dev/null 2>&1
 }
@@ -47,7 +49,73 @@ log_err() {
     fi
 }
 
-# Load environment
+log_sql_messages() {
+    log_fn="$1"
+    operation="$2"
+    stderr_file="$3"
+    saw_output=false
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        saw_output=true
+        "$log_fn" "[sql:$operation] $line"
+    done <"$stderr_file"
+
+    if [ "$saw_output" != true ]; then
+        "$log_fn" "[sql:$operation] command failed"
+    fi
+}
+
+run_sql_command() {
+    sql="$1"
+    operation="$2"
+    log_fn="$3"
+    stderr_file=$(umask 077 && mktemp "/tmp/${SCRIPT_NAME}.sql.XXXXXX") || {
+        "$log_fn" "[sql:$operation] failed to create temp file for SQL stderr capture"
+        return 1
+    }
+
+    if output=$(printf '%s\n' "$sql" | eval "$CLIENT_CMD" 2>"$stderr_file"); then
+        rm -f -- "$stderr_file"
+        printf '%s' "$output"
+        return 0
+    fi
+
+    log_sql_messages "$log_fn" "$operation" "$stderr_file"
+    rm -f -- "$stderr_file"
+    return 1
+}
+
+format_sql_timestamp() {
+    tick="$1"
+    case "$DATE_EPOCH_MODE" in
+    bsd)
+        date -u -r "$tick" '+%Y-%m-%d %H:%M:%S+00:00'
+        ;;
+    gnu)
+        date -u -d "@$tick" '+%Y-%m-%d %H:%M:%S+00:00'
+        ;;
+    *)
+        log_err "unsupported DATE_EPOCH_MODE='$DATE_EPOCH_MODE'"
+        exit 1
+        ;;
+    esac
+}
+
+detect_date_epoch_mode() {
+    probe_tick=0
+    if date -u -r "$probe_tick" '+%Y-%m-%d %H:%M:%S' >/dev/null 2>&1; then
+        DATE_EPOCH_MODE=bsd
+        return 0
+    fi
+    if date -u -d "@$probe_tick" '+%Y-%m-%d %H:%M:%S' >/dev/null 2>&1; then
+        DATE_EPOCH_MODE=gnu
+        return 0
+    fi
+    log_err "unable to determine supported epoch date format"
+    exit 1
+}
+
+# Environment
 ENV_DIR="$(dirname "$0")/env"
 # shellcheck disable=SC1091
 [ -f "$ENV_DIR/.env.pinger" ] && . "$ENV_DIR/.env.pinger"
@@ -63,7 +131,7 @@ ENV_DIR="$(dirname "$0")/env"
 : "${PGDATABASE:=pinger_db}"
 : "${PGUSER:=pinger}"
 
-# Drop privileges if needed
+# Startup validation and privilege drop
 if [ "$(id -un)" != "$SERVICE_USER" ]; then
     log "Dropping privileges to '$SERVICE_USER'"
     exec chpst -u "$SERVICE_USER" /bin/sh "$0" "$@"
@@ -71,7 +139,7 @@ fi
 
 RING_BUFFER_SIZE=$((RING_BUFFER_DAYS * 86400))
 
-# Common SQL templates
+# SQL setup
 INIT_SCHEMA_SQL=$(
     cat <<'EOS'
 -- SQLite or PostgreSQL schema initialization
@@ -80,17 +148,16 @@ CREATE TABLE IF NOT EXISTS pings (
     ts         %TSTYPE% NOT NULL DEFAULT CURRENT_TIMESTAMP UNIQUE,
     latency_ms REAL   NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_pings_ts ON pings(ts);
 EOS
 )
 
 UPSERT_SQL=$(
     cat <<'EOS'
 -- SQLite or PostgreSQL upsert
-INSERT INTO pings(slot, latency_ms) VALUES(
-    %SLOT%, %RTT%
+INSERT INTO pings(slot, ts, latency_ms) VALUES(
+    %SLOT%, '%TS%', %RTT%
 ) ON CONFLICT(slot) DO UPDATE SET
-    ts         = CURRENT_TIMESTAMP,
+    ts         = '%TS%',
     latency_ms = EXCLUDED.latency_ms;
 EOS
 )
@@ -114,29 +181,34 @@ postgres)
 esac
 
 # Initialize schema
-echo "$INIT_SCHEMA_SQL" | sed "$SED_SCHEMA" | eval "$CLIENT_CMD"
+run_sql_command "$(echo "$INIT_SCHEMA_SQL" | sed "$SED_SCHEMA")" \
+    "init-schema" \
+    log_err >/dev/null
 log "Initialized pinger target='$TARGET' db_type='$DB_TYPE' ring_buffer_days='$RING_BUFFER_DAYS' ring_buffer_size='$RING_BUFFER_SIZE'"
 
 # Determine starting slot
-last_slot=$(echo "$SELECT_LAST_SLOT" | eval "$CLIENT_CMD")
+last_slot=$(run_sql_command "$SELECT_LAST_SLOT" "select-last-slot" log_err)
 case "$last_slot" in
 '' | *[!0-9]*) slot=0 ;;                           # invalid
 *) slot=$(((last_slot + 1) % RING_BUFFER_SIZE)) ;; # wrap
 esac
 
-# Startup delay to ensure unique integer-second timestamps
-sleep 1
+# Sampling setup
+detect_date_epoch_mode
 target_reachable=1
+next_tick=$(($(date -u +%s) + 1))
 
-# Main loop: keep a strict 1 Hz cadence aligned to wall-clock seconds
+# Main loop: keep a strict 1 Hz cadence aligned to wall-clock seconds and skip
+# missed intervals instead of catching up within the same second.
 while :; do
-    # Wait until the scheduled next whole second
     while :; do
         now=$(date -u +%s)
-        [ "$now" -ge "${next_tick:-0}" ] && break
+        [ "$now" -ge "$next_tick" ] && break
         sleep 0.1
     done
+    sample_tick=$next_tick
     next_tick=$((now + 1))
+    sample_ts=$(format_sql_timestamp "$sample_tick")
 
     # One probe with a 1-second timeout (BSD ping6 uses seconds for -W)
     rtt=$(ping6 -c 1 -W 1 -q "$TARGET" 2>/dev/null | awk -F/ '/[Mm]in\/avg\/max/ {print $5; exit}')
@@ -147,8 +219,10 @@ while :; do
             target_reachable=1
         fi
         SQL=$(echo "$UPSERT_SQL" |
-            sed "s/%SLOT%/$slot/; s/%RTT%/$rtt/")
-        echo "$SQL" | eval "$CLIENT_CMD"
+            sed "s/%SLOT%/$slot/; s/%TS%/$sample_ts/; s/%RTT%/$rtt/")
+        if ! run_sql_command "$SQL" "write-sample" log_err >/dev/null; then
+            continue
+        fi
         slot=$(((slot + 1) % RING_BUFFER_SIZE))
     else
         if [ "$target_reachable" -eq 1 ]; then

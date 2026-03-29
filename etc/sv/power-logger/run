@@ -24,7 +24,9 @@
 set -eu
 
 SCRIPT_NAME=power-logger
+DATE_EPOCH_MODE=""
 
+# Helpers
 has_cmd() {
     command -v "$1" >/dev/null 2>&1
 }
@@ -56,7 +58,84 @@ log_err() {
     fi
 }
 
-# Load environment
+log_sql_messages() {
+    log_fn="$1"
+    operation="$2"
+    stderr_file="$3"
+    saw_output=false
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        saw_output=true
+        "$log_fn" "[sql:$operation] $line"
+    done <"$stderr_file"
+
+    if [ "$saw_output" != true ]; then
+        "$log_fn" "[sql:$operation] command failed"
+    fi
+}
+
+run_sql_command() {
+    sql="$1"
+    operation="$2"
+    log_fn="$3"
+    stderr_file=$(umask 077 && mktemp "/tmp/${SCRIPT_NAME}.sql.XXXXXX") || {
+        "$log_fn" "[sql:$operation] failed to create temp file for SQL stderr capture"
+        return 1
+    }
+
+    if output=$(printf '%s\n' "$sql" | eval "$CLIENT_CMD" 2>"$stderr_file"); then
+        rm -f -- "$stderr_file"
+        printf '%s' "$output"
+        return 0
+    fi
+
+    log_sql_messages "$log_fn" "$operation" "$stderr_file"
+    rm -f -- "$stderr_file"
+    return 1
+}
+
+apcaccess_value() {
+    eval "$APCACCESS_BIN $APCACCESS_ARGS -u -p $1"
+}
+
+# Extract numeric watts from IPMI SDR output.
+ipmi_power_meter() {
+    eval "$IPMI_CMD" 2>/dev/null | awk -F'|' -v name="$IPMI_SENSOR" '
+        $1 ~ name { gsub(/[^0-9.]/, "", $2); if ($2 != "") { print $2; exit } }
+    '
+}
+
+format_sql_timestamp() {
+    tick="$1"
+    case "$DATE_EPOCH_MODE" in
+    bsd)
+        date -u -r "$tick" '+%Y-%m-%d %H:%M:%S+00:00'
+        ;;
+    gnu)
+        date -u -d "@$tick" '+%Y-%m-%d %H:%M:%S+00:00'
+        ;;
+    *)
+        log_err "unsupported DATE_EPOCH_MODE='$DATE_EPOCH_MODE'"
+        exit 1
+        ;;
+    esac
+}
+
+detect_date_epoch_mode() {
+    probe_tick=0
+    if date -u -r "$probe_tick" '+%Y-%m-%d %H:%M:%S' >/dev/null 2>&1; then
+        DATE_EPOCH_MODE=bsd
+        return 0
+    fi
+    if date -u -d "@$probe_tick" '+%Y-%m-%d %H:%M:%S' >/dev/null 2>&1; then
+        DATE_EPOCH_MODE=gnu
+        return 0
+    fi
+    log_err "unable to determine supported epoch date format"
+    exit 1
+}
+
+# Environment
 ENV_DIR="$(dirname "$0")/env"
 # shellcheck disable=SC1091
 [ -f "$ENV_DIR/.env.power-logger" ] && . "$ENV_DIR/.env.power-logger"
@@ -70,14 +149,14 @@ ENV_DIR="$(dirname "$0")/env"
 : "${PGHOST:=/tmp}"
 : "${PGPORT:=5432}"
 : "${PGDATABASE:=power_logger_db}"
-: "${PGUSER:=power_logger}"
+: "${PGUSER:=power-logger}"
 : "${POWER_SOURCE:=apc}"
 : "${APCACCESS_BIN:=apcaccess}"
 : "${APCACCESS_ARGS:=}"
 : "${IPMI_CMD:=ipmitool sdr}"
 : "${IPMI_SENSOR:=Power Meter}"
 
-# Drop privileges if needed
+# Startup validation and privilege drop
 if [ "$(id -un)" != "$SERVICE_USER" ]; then
     log "Dropping privileges to '$SERVICE_USER'"
     exec chpst -u "$SERVICE_USER" /bin/sh "$0" "$@"
@@ -97,28 +176,27 @@ esac
 RING_BUFFER_SIZE=$((RING_BUFFER_DAYS * 86400 / INTERVAL_SEC))
 [ "$RING_BUFFER_SIZE" -ge 1 ] || RING_BUFFER_SIZE=1
 
-# Common SQL templates
+# SQL setup
 INIT_SCHEMA_SQL=$(
     cat <<'EOS'
 -- SQLite or PostgreSQL schema initialization
 CREATE TABLE IF NOT EXISTS watts (
     slot      INTEGER PRIMARY KEY,
     ts        %TSTYPE% NOT NULL DEFAULT CURRENT_TIMESTAMP UNIQUE,
-    watts     REAL    NOT NULL,
+    power_w   REAL    NOT NULL,
     loadpct   REAL    NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_watts_ts ON watts(ts);
 EOS
 )
 
 UPSERT_SQL=$(
     cat <<'EOS'
 -- SQLite or PostgreSQL upsert
-INSERT INTO watts(slot, watts, loadpct) VALUES(
-    %SLOT%, %WATTS%, %LOADPCT%
+INSERT INTO watts(slot, ts, power_w, loadpct) VALUES(
+    %SLOT%, '%TS%', %WATTS%, %LOADPCT%
 ) ON CONFLICT(slot) DO UPDATE SET
-    ts       = CURRENT_TIMESTAMP,
-    watts    = EXCLUDED.watts,
+    ts       = '%TS%',
+    power_w  = EXCLUDED.power_w,
     loadpct  = EXCLUDED.loadpct;
 EOS
 )
@@ -142,30 +220,19 @@ postgres)
 esac
 
 # Initialize schema
-echo "$INIT_SCHEMA_SQL" | sed "$SED_SCHEMA" | eval "$CLIENT_CMD"
+run_sql_command "$(echo "$INIT_SCHEMA_SQL" | sed "$SED_SCHEMA")" \
+    "init-schema" \
+    log_err >/dev/null
 log "Initialized power logger source='$POWER_SOURCE' db_type='$DB_TYPE' interval='$INTERVAL_SEC' ring_buffer_size='$RING_BUFFER_SIZE'"
 
 # Determine starting slot
-last_slot=$(echo "$SELECT_LAST_SLOT" | eval "$CLIENT_CMD")
+last_slot=$(run_sql_command "$SELECT_LAST_SLOT" "select-last-slot" log_err)
 case "$last_slot" in
-'' | *[!0-9]*) slot=0 ;;                           # invalid
-*) slot=$(((last_slot + 1) % RING_BUFFER_SIZE)) ;; # wrap
+'' | *[!0-9]*) slot=0 ;;
+*) slot=$(((last_slot + 1) % RING_BUFFER_SIZE)) ;;
 esac
 
-apcaccess_value() {
-    eval "$APCACCESS_BIN $APCACCESS_ARGS -u -p $1"
-}
-
-# Extract numeric watts from IPMI SDR output.
-ipmi_power_meter() {
-    eval "$IPMI_CMD" 2>/dev/null | awk -F'|' -v name="$IPMI_SENSOR" '
-        $1 ~ name { gsub(/[^0-9.]/, "", $2); if ($2 != "") { print $2; exit } }
-    '
-}
-
-# Startup delay to ensure unique integer-second timestamps
-sleep 1
-
+# Sampling setup
 case "$POWER_SOURCE" in
 apc)
     # Fetch NOMPOWER once (constant for the UPS)
@@ -190,14 +257,22 @@ ipmi) ;;
     ;;
 esac
 
+detect_date_epoch_mode
+next_tick=$(($(date -u +%s) + INTERVAL_SEC))
+
 while :; do
-    # Wait until the scheduled next whole second
+    # Wait for the next scheduled whole-second sample boundary. If a prior
+    # iteration ran long, skip missed intervals instead of catching up inside
+    # the same wall-clock second.
     while :; do
         now=$(date -u +%s)
-        [ "$now" -ge "${next_tick:-0}" ] && break
+        [ "$now" -ge "$next_tick" ] && break
         sleep 0.1
     done
-    next_tick=$((now + INTERVAL_SEC))
+    sample_tick=$next_tick
+    missed_intervals=$(((now - sample_tick) / INTERVAL_SEC))
+    next_tick=$((sample_tick + (missed_intervals + 1) * INTERVAL_SEC))
+    sample_ts=$(format_sql_timestamp "$sample_tick")
 
     case "$POWER_SOURCE" in
     apc)
@@ -224,7 +299,9 @@ while :; do
     esac
 
     SQL=$(echo "$UPSERT_SQL" |
-        sed "s/%SLOT%/$slot/; s/%WATTS%/$WATTS/; s/%LOADPCT%/$LOADPCT/")
-    echo "$SQL" | eval "$CLIENT_CMD"
+        sed "s/%SLOT%/$slot/; s/%TS%/$sample_ts/; s/%WATTS%/$WATTS/; s/%LOADPCT%/$LOADPCT/")
+    if ! run_sql_command "$SQL" "write-sample" log_err >/dev/null; then
+        continue
+    fi
     slot=$(((slot + 1) % RING_BUFFER_SIZE))
 done
