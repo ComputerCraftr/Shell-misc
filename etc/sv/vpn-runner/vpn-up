@@ -75,6 +75,8 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+ensure_absolute_path "VPN resolv.conf path" "$VPN_RESOLV_CONF"
+ensure_absolute_path "Active resolv.conf path" "$ACTIVE_RESOLV_CONF"
 if [ -f "$VPN_RESOLV_CONF" ]; then
     if ! replace_file_atomically "$VPN_RESOLV_CONF" "$ACTIVE_RESOLV_CONF"; then
         log_err "Failed to replace resolv.conf from '$VPN_RESOLV_CONF'"
@@ -84,11 +86,14 @@ if [ -f "$VPN_RESOLV_CONF" ]; then
 fi
 
 # Load environment variables from /usr/local/etc/.gateway-env.conf config file.
+ensure_absolute_path "Environment config path" "$ENV_CONF"
 # shellcheck disable=SC1090
 . "$ENV_CONF"
+ensure_absolute_path "OpenVPN template path" "$OVPN_TEMPLATE"
 
 # Configuration: timeouts, intervals, and retry settings.
 TUN_IF=$(awk '/dev / {print $2; exit}' <"$OVPN_TEMPLATE")
+ensure_safe_interface_name "Tunnel interface" "$TUN_IF"
 IP_TIMEOUT=30      # Total seconds to wait for an IP address.
 GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.

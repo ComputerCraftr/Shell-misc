@@ -25,11 +25,19 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # Load environment variables from /usr/local/etc/.gateway-env.conf config file.
+ensure_absolute_path "Environment config path" "$ENV_CONF"
 # shellcheck disable=SC1090
 . "$ENV_CONF"
 
+ensure_absolute_path "OpenVPN template path" "$OVPN_TEMPLATE"
+ensure_absolute_path "OpenVPN config path" "$OVPN_FILE"
+ensure_absolute_path "OpenVPN auth path" "$OVPN_AUTH"
+[ -z "${OVPN_PROXY_AUTH:-}" ] || ensure_absolute_path "OpenVPN proxy auth path" "$OVPN_PROXY_AUTH"
+ensure_safe_interface_list "External interface list" "$EXT_IF_LIST"
+
 # Configuration: timeouts, intervals, and retry settings.
 OVPN_PROXY_PORT=$(tail -n 1 "${OVPN_PROXY_AUTH:-}" 2>/dev/null || echo 0)
+ensure_nonempty_decimal "OpenVPN proxy port" "$OVPN_PROXY_PORT"
 GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
 
@@ -56,6 +64,7 @@ while [ -n "$CANDIDATE_LINES" ]; do
 
     # Grab exactly that line.
     EXT_IF_NEW=$(echo "$CANDIDATE_LINES" | sed -n "${INDEX}p")
+    ensure_safe_interface_name "Candidate interface" "$EXT_IF_NEW"
     log "Trying candidate interface '$EXT_IF_NEW' index=$INDEX"
 
     remove_current() {
