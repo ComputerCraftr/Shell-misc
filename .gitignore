@@ -1,1 +1,11 @@
 .DS_Store
+.codex
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+htmlcov/
+__pycache__/
+tests/__pycache__/
+packages/__pycache__/
