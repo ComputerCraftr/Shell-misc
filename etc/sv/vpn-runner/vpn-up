@@ -2,6 +2,7 @@
 set -eu
 
 SCRIPT_NAME=vpn-up
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 VPN_RESOLV_CONF=/etc/resolv.conf.vpn
 ACTIVE_RESOLV_CONF=/etc/resolv.conf
 ENV_CONF=/usr/local/etc/.gateway-env.conf
@@ -12,9 +13,61 @@ DISCORD_RETRY_COUNT=5
 DISCORD_RETRY_DELAY=5
 DISCORD_IP_FAMILY=-4
 
-# Define logging wrapper functions.
-log() { logger -t "$SCRIPT_NAME" -p daemon.notice "$*"; }
-log_err() { logger -t "$SCRIPT_NAME" -p daemon.err "$*"; }
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/common.sh"
+
+ensure_lock_paths() {
+    if [ -L "$LOCK_BASE" ]; then
+        log_err "Lock path must not be a symlink: $LOCK_BASE"
+        exit 1
+    fi
+    if [ -e "$LOCK_BASE" ] && [ ! -d "$LOCK_BASE" ]; then
+        log_err "Lock path exists but is not a directory: $LOCK_BASE"
+        exit 1
+    fi
+    if [ -L "$LOCK_PID_FILE" ]; then
+        log_err "Lock pid file must not be a symlink: $LOCK_PID_FILE"
+        exit 1
+    fi
+    if [ -e "$LOCK_PID_FILE" ] && [ ! -f "$LOCK_PID_FILE" ]; then
+        log_err "Lock pid path exists but is not a regular file: $LOCK_PID_FILE"
+        exit 1
+    fi
+}
+
+clear_stale_lock() {
+    ensure_lock_paths
+    if [ -f "$LOCK_PID_FILE" ] && ! rm -f -- "$LOCK_PID_FILE"; then
+        log_err "Failed to remove stale lock pid file: $LOCK_PID_FILE"
+        exit 1
+    fi
+    if [ -d "$LOCK_BASE" ] && ! rmdir "$LOCK_BASE"; then
+        log_err "Refusing to remove non-empty stale lock directory: $LOCK_BASE"
+        exit 1
+    fi
+}
+
+release_lock() {
+    ensure_lock_paths
+    if [ ! -d "$LOCK_BASE" ]; then
+        return 0
+    fi
+
+    owner_pid=""
+    if [ -f "$LOCK_PID_FILE" ]; then
+        owner_pid=$(cat "$LOCK_PID_FILE" 2>/dev/null || echo "")
+    fi
+    if [ "$owner_pid" = "$$" ]; then
+        if [ -f "$LOCK_PID_FILE" ] && ! rm -f -- "$LOCK_PID_FILE"; then
+            log_err "Failed to remove lock pid file: $LOCK_PID_FILE"
+            return 1
+        fi
+        if ! rmdir "$LOCK_BASE"; then
+            log_err "Refusing to remove non-empty lock directory: $LOCK_BASE"
+            return 1
+        fi
+    fi
+}
 
 # Ensure the script is run as root.
 if [ "$(id -u)" -ne 0 ]; then
@@ -23,7 +76,10 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 if [ -f "$VPN_RESOLV_CONF" ]; then
-    cp "$VPN_RESOLV_CONF" "$ACTIVE_RESOLV_CONF"
+    if ! replace_file_atomically "$VPN_RESOLV_CONF" "$ACTIVE_RESOLV_CONF"; then
+        log_err "Failed to replace resolv.conf from '$VPN_RESOLV_CONF'"
+        exit 1
+    fi
     log "Configured resolv.conf for VPN."
 fi
 
@@ -37,20 +93,39 @@ IP_TIMEOUT=30      # Total seconds to wait for an IP address.
 GATEWAY_TIMEOUT=10 # Total seconds to wait for default gateway(s).
 INTERVAL=1         # Polling interval in seconds.
 
-# Ensure single instance using a simple PID-based lockfile.
-LOCKFILE="${LOCK_DIR}/${SCRIPT_NAME}.${TUN_IF}.lock"
-if [ -e "$LOCKFILE" ]; then
-    OLDPID=$(cat "$LOCKFILE" 2>/dev/null || echo "")
-    if [ -n "$OLDPID" ] && kill -0 "$OLDPID" 2>/dev/null; then
-        log_err "Lockfile exists and process $OLDPID is still running. Exiting."
-        exit 0
-    fi
-    log "Stale lockfile found. Removing..."
-    rm -f "$LOCKFILE"
-fi
+# Ensure a single instance with an atomic lock directory.
+LOCK_BASE="${LOCK_DIR}/${SCRIPT_NAME}.${TUN_IF}.lock"
+LOCK_PID_FILE="${LOCK_BASE}/pid"
+while ! mkdir "$LOCK_BASE" 2>/dev/null; do
+    ensure_lock_paths
 
-echo $$ >"$LOCKFILE"
-trap 'rm -f "$LOCKFILE"' EXIT INT TERM HUP
+    OLDPID=$(cat "$LOCK_PID_FILE" 2>/dev/null || echo "")
+    case "$OLDPID" in
+    '' | *[!0-9]*)
+        stale_lock=true
+        ;;
+    *)
+        if kill -0 "$OLDPID" 2>/dev/null; then
+            log_err "Lock directory exists and process $OLDPID is still running. Exiting."
+            exit 0
+        fi
+        stale_lock=true
+        ;;
+    esac
+
+    if [ "$stale_lock" = true ]; then
+        log "Stale lock directory found. Removing..."
+        clear_stale_lock
+        continue
+    fi
+done
+
+ensure_lock_paths
+if ! write_file_atomically_mode "$LOCK_PID_FILE" 600 -- printf '%s\n' "$$"; then
+    log_err "Failed to write lock pid file: $LOCK_PID_FILE"
+    exit 1
+fi
+trap 'release_lock' EXIT INT TERM HUP
 
 # Restart ipfw if we need to detect and apply rules on a new interface.
 if { [ -n "$GIF_IF" ] && ! ipfw list | grep -qwF "$GIF_IF"; } ||

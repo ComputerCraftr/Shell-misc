@@ -1,7 +1,9 @@
 #!/bin/sh
 set -eu
 
+# shellcheck disable=SC2034
 SCRIPT_NAME=vpn-runner
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ENV_CONF=/usr/local/etc/.gateway-env.conf
 STARTUP_DELAY=10
 DHCLIENT_SERVICE=dhclient
@@ -10,9 +12,8 @@ OPENVPN_SYSLOG_TAG=openvpn
 PROXY_PROBE_TIMEOUT=5
 PROXY_PROBE_PORT=5201
 
-# Define logging wrapper functions.
-log() { logger -t "$SCRIPT_NAME" -p daemon.notice "$*"; }
-log_err() { logger -t "$SCRIPT_NAME" -p daemon.err "$*"; }
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/common.sh"
 
 # Delay startup to ensure network is settled.
 sleep "$STARTUP_DELAY"
@@ -123,16 +124,24 @@ fi
 # Update the OpenVPN configuration.
 if [ "$EXT_IF_AVAILABLE" -eq 1 ] && [ -f "${OVPN_PROXY_AUTH:-}" ] &&
     [ -n "$DEFAULT_GW_IPV4" ] && [ "$OVPN_PROXY_PORT" -gt 0 ]; then
-    sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
+    if ! write_file_atomically "$OVPN_FILE" \
+        sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
         -e "s|__PROXY_STRING__|${DEFAULT_GW_IPV4} ${OVPN_PROXY_PORT}|" \
         -e "s|__PROXY_AUTH_FILE__|$OVPN_PROXY_AUTH|" \
-        "$OVPN_TEMPLATE" >"$OVPN_FILE"
+        "$OVPN_TEMPLATE"; then
+        log_err "Failed to write OpenVPN config '$OVPN_FILE'"
+        exit 1
+    fi
     log "Wrote OpenVPN config '$OVPN_FILE' using proxy '$DEFAULT_GW_IPV4:$OVPN_PROXY_PORT'"
 else
-    sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
+    if ! write_file_atomically "$OVPN_FILE" \
+        sed -e "s|__AUTH_FILE__|$OVPN_AUTH|" \
         -e "/__PROXY_STRING__/d" \
         -e "/__PROXY_AUTH_FILE__/d" \
-        "$OVPN_TEMPLATE" >"$OVPN_FILE"
+        "$OVPN_TEMPLATE"; then
+        log_err "Failed to write OpenVPN config '$OVPN_FILE'"
+        exit 1
+    fi
     log "Wrote OpenVPN config '$OVPN_FILE' without proxy"
 fi
 

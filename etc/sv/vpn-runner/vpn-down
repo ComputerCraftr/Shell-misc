@@ -1,13 +1,14 @@
 #!/bin/sh
 set -eu
 
+# shellcheck disable=SC2034
 SCRIPT_NAME=vpn-down
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 RESOLV_CONF_BACKUP=/etc/resolv.conf.bak
 ACTIVE_RESOLV_CONF=/etc/resolv.conf
 
-# Define logging wrapper functions.
-log() { logger -t "$SCRIPT_NAME" -p daemon.notice "$*"; }
-log_err() { logger -t "$SCRIPT_NAME" -p daemon.err "$*"; }
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/common.sh"
 
 # Ensure the script is run as root.
 if [ "$(id -u)" -ne 0 ]; then
@@ -18,7 +19,10 @@ fi
 log "Starting VPN teardown"
 
 if [ -f "$RESOLV_CONF_BACKUP" ]; then
-    cp "$RESOLV_CONF_BACKUP" "$ACTIVE_RESOLV_CONF"
+    if ! replace_file_atomically "$RESOLV_CONF_BACKUP" "$ACTIVE_RESOLV_CONF"; then
+        log_err "Failed to restore resolv.conf from '$RESOLV_CONF_BACKUP'"
+        exit 1
+    fi
     log "Restored resolv.conf to default."
 else
     log "No backup resolv.conf found at '$RESOLV_CONF_BACKUP'; leaving resolv.conf unchanged."
