@@ -273,6 +273,47 @@ def test_xbps_iter_hits_sorts_by_manual_package_order_not_set_order(
     ]
 
 
+def test_pkg_iter_hits_uses_manual_order_and_name_only_queries(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    responses = {
+        ("pkg", "query", "-e", "%a = 0", "%n"): ["alpha", "beta", "gamma"],
+        ("pkg", "query", "%dn", "alpha"): ["gamma", "beta", "libc"],
+        ("pkg", "query", "%dn", "beta"): [],
+        ("pkg", "query", "%dn", "gamma"): ["beta", "ssl"],
+    }
+    seen: list[tuple[str, ...]] = []
+
+    def fake_run_lines(cmd: list[str]) -> list[str]:
+        key = tuple(cmd)
+        seen.append(key)
+        return responses[key]
+
+    monkeypatch.setattr(deps_dupes, "run_lines", fake_run_lines)
+
+    assert deps_dupes.pkg_iter_hits() == [
+        deps_dupes.make_record("pkg", "alpha", "beta"),
+        deps_dupes.make_record("pkg", "alpha", "gamma"),
+        deps_dupes.make_record("pkg", "gamma", "beta"),
+    ]
+    assert seen == [
+        ("pkg", "query", "-e", "%a = 0", "%n"),
+        ("pkg", "query", "%dn", "alpha"),
+        ("pkg", "query", "%dn", "beta"),
+        ("pkg", "query", "%dn", "gamma"),
+    ]
+
+
+def test_pkg_iter_hits_rejects_empty_manual_list(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(deps_dupes, "run_lines", lambda cmd: [])
+    try:
+        deps_dupes.pkg_iter_hits()
+    except RuntimeError as exc:
+        assert str(exc) == "pkg query returned no manually installed packages"
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
 def test_brew_iter_hits_includes_formula_and_cask_dependencies(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -570,6 +611,14 @@ def test_detect_manager_other_branches(monkeypatch: MonkeyPatch) -> None:
     )
     assert deps_dupes.detect_manager() == "xbps"
 
+    monkeypatch.setattr(
+        deps_dupes.shutil,
+        "which",
+        lambda cmd: f"/usr/bin/{cmd}" if cmd in {"brew", "pkg"} else None,
+    )
+    monkeypatch.setattr(deps_dupes.sys, "platform", "freebsd14")
+    assert deps_dupes.detect_manager() == "pkg"
+
     monkeypatch.setattr(deps_dupes.shutil, "which", lambda cmd: None)
     try:
         deps_dupes.detect_manager()
@@ -614,10 +663,10 @@ def test_parse_args_and_main(
     monkeypatch.setattr(
         deps_dupes.sys,
         "argv",
-        ["deps-dupes.py", "--manager", "apt", "--format", "json"],
+        ["dependency_dupes.py", "--manager", "pkg", "--format", "json"],
     )
     args = deps_dupes.parse_args()
-    assert args.manager == "apt"
+    assert args.manager == "pkg"
     assert args.format == "json"
 
     monkeypatch.setattr(

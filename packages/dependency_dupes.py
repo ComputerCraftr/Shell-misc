@@ -206,6 +206,18 @@ def xbps_iter_hits() -> list[Record]:
     )
 
 
+def pkg_iter_hits() -> list[Record]:
+    def load_pkg_deps(pkg: str) -> set[str]:
+        return set(run_lines(["pkg", "query", "%dn", pkg]))
+
+    return iter_selected_hits(
+        "pkg",
+        run_lines(["pkg", "query", "-e", "%a = 0", "%n"]),
+        load_pkg_deps,
+        "pkg query returned no manually installed packages",
+    )
+
+
 def brew_installed_on_request(formula: dict[str, object]) -> bool:
     installed = formula.get("installed")
     if not isinstance(installed, list):
@@ -336,6 +348,7 @@ def brew_iter_hits() -> list[Record]:
 BACKENDS = {
     "apt": ("apt-mark", apt_iter_hits),
     "brew": ("brew", brew_iter_hits),
+    "pkg": ("pkg", pkg_iter_hits),
     "xbps": ("xbps-query", xbps_iter_hits),
 }
 
@@ -350,6 +363,8 @@ def detect_manager() -> str:
         return "apt"
     if "xbps" in available and sys.platform.startswith("linux"):
         return "xbps"
+    if "pkg" in available and sys.platform.startswith("freebsd"):
+        return "pkg"
     if not available:
         raise RuntimeError("no supported package manager found")
     raise RuntimeError(
@@ -363,7 +378,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--manager",
-        choices=("auto", "apt", "brew", "xbps"),
+        choices=("auto", "apt", "brew", "pkg", "xbps"),
         default="auto",
         help="package manager backend to use",
     )
