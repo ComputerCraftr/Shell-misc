@@ -45,8 +45,10 @@ INTERVAL=1         # Polling interval in seconds.
 EXT_IF_CUR=$(netstat -rn -f inet 2>/dev/null | awk '$1 == "default" {print $4; exit}')
 log "Current default interface='${EXT_IF_CUR:-none}' candidates='${EXT_IF_LIST}'"
 
-# Build a newline-separated list of candidates, filtering out the current default.
-CANDIDATE_LINES=$(echo "$EXT_IF_LIST" | tr ',' '\n' | grep -Fvx "$EXT_IF_CUR")
+# Build a newline-separated list of candidates, trying the current default last.
+CANDIDATE_LINES_OTHER=$(echo "$EXT_IF_LIST" | tr ',' '\n' | grep -Fvx "${EXT_IF_CUR:-}")
+CANDIDATE_LINES_CUR=$(echo "$EXT_IF_LIST" | tr ',' '\n' | grep -Fx "${EXT_IF_CUR:-}" || true)
+CANDIDATE_LINES=$(printf '%s\n%s\n' "$CANDIDATE_LINES_OTHER" "$CANDIDATE_LINES_CUR" | sed '/./!d')
 
 if [ -z "$CANDIDATE_LINES" ]; then
     log_err "Error: No candidate interfaces available."
@@ -58,9 +60,15 @@ EXT_IF_NEW=""
 EXT_IF_AVAILABLE=0
 DEFAULT_GW_IPV4=""
 while [ -n "$CANDIDATE_LINES" ]; do
-    # Pick a random index (1…NUM_CANDIDATES).
-    RAND=$(od -An -N2 -tu2 /dev/urandom | tr -d ' ')
-    INDEX=$((RAND % $(echo "$CANDIDATE_LINES" | wc -l) + 1))
+    # Pick a random index from all but the last candidate, reserving the last entry
+    # so the current default interface is retried only after every other candidate fails.
+    NUM_CANDIDATES=$(echo "$CANDIDATE_LINES" | wc -l | tr -d ' ')
+    if [ "$NUM_CANDIDATES" -gt 1 ]; then
+        RAND=$(od -An -N2 -tu2 /dev/urandom | tr -d ' ')
+        INDEX=$((RAND % (NUM_CANDIDATES - 1) + 1))
+    else
+        INDEX=1
+    fi
 
     # Grab exactly that line.
     EXT_IF_NEW=$(echo "$CANDIDATE_LINES" | sed -n "${INDEX}p")
