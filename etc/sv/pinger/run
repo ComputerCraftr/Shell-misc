@@ -140,10 +140,10 @@ fi
 RING_BUFFER_SIZE=$((RING_BUFFER_DAYS * 86400))
 
 # SQL setup
-INIT_SCHEMA_SQL=$(
+INIT_SCHEMA_TMPL=$(
     cat <<'EOS'
 -- SQLite or PostgreSQL schema initialization
-CREATE TABLE IF NOT EXISTS pings (
+CREATE TABLE IF NOT EXISTS %TABLE% (
     slot       INTEGER PRIMARY KEY,
     ts         %TSTYPE% NOT NULL DEFAULT CURRENT_TIMESTAMP UNIQUE,
     latency_ms REAL   NOT NULL
@@ -151,27 +151,27 @@ CREATE TABLE IF NOT EXISTS pings (
 EOS
 )
 
-UPSERT_SQL=$(
+UPSERT_TMPL=$(
     cat <<'EOS'
 -- SQLite or PostgreSQL upsert
-INSERT INTO pings(slot, ts, latency_ms) VALUES(
-    %SLOT%, '%TS%', %RTT%
+INSERT INTO %TABLE%(slot, ts, latency_ms) VALUES(
+    %CURRENT_SLOT%, '%CURRENT_TS%', %RTT%
 ) ON CONFLICT(slot) DO UPDATE SET
-    ts         = '%TS%',
+    ts         = '%CURRENT_TS%',
     latency_ms = EXCLUDED.latency_ms;
 EOS
 )
 
-SELECT_LAST_SLOT="SELECT slot FROM pings ORDER BY ts DESC LIMIT 1;"
+LAST_SLOT_TMPL="SELECT slot FROM %TABLE% ORDER BY ts DESC LIMIT 1;"
 
 # Determine client command and schema substitutions
 case "$DB_TYPE" in
 sqlite)
-    SED_SCHEMA='s/%TSTYPE%/DATETIME/g'
+    SED_RENDER='s/%TABLE%/pings/g; s/%TSTYPE%/DATETIME/g'
     CLIENT_CMD="sqlite3 '$DB_FILE'"
     ;;
 postgres)
-    SED_SCHEMA='s/%TSTYPE%/TIMESTAMPTZ/g'
+    SED_RENDER='s/%TABLE%/pinger.pings/g; s/%TSTYPE%/TIMESTAMPTZ/g'
     CLIENT_CMD="psql -qAt -h '$PGHOST' -p '$PGPORT' -U '$PGUSER' -d '$PGDATABASE'"
     ;;
 *)
@@ -181,16 +181,19 @@ postgres)
 esac
 
 # Initialize schema
-run_sql_command "$(echo "$INIT_SCHEMA_SQL" | sed "$SED_SCHEMA")" \
+INIT_SCHEMA_SQL=$(echo "$INIT_SCHEMA_TMPL" | sed "$SED_RENDER")
+run_sql_command "$INIT_SCHEMA_SQL" \
     "init-schema" \
     log_err >/dev/null
 log "Initialized pinger target='$TARGET' db_type='$DB_TYPE' ring_buffer_days='$RING_BUFFER_DAYS' ring_buffer_size='$RING_BUFFER_SIZE'"
 
 # Determine starting slot
-last_slot=$(run_sql_command "$SELECT_LAST_SLOT" "select-last-slot" log_err)
-case "$last_slot" in
-'' | *[!0-9]*) slot=0 ;;                           # invalid
-*) slot=$(((last_slot + 1) % RING_BUFFER_SIZE)) ;; # wrap
+LAST_SLOT_SQL=$(echo "$LAST_SLOT_TMPL" | sed "$SED_RENDER")
+LAST_SLOT=$(run_sql_command "$LAST_SLOT_SQL" "select-last-slot" log_err)
+
+case "$LAST_SLOT" in
+'' | *[!0-9]*) CURRENT_SLOT=0 ;;
+*) CURRENT_SLOT=$(((LAST_SLOT + 1) % RING_BUFFER_SIZE)) ;;
 esac
 
 # Sampling setup
@@ -208,22 +211,22 @@ while :; do
     done
     sample_tick=$next_tick
     next_tick=$((now + 1))
-    sample_ts=$(format_sql_timestamp "$sample_tick")
+    CURRENT_TS=$(format_sql_timestamp "$sample_tick")
 
     # One probe with a 1-second timeout (BSD ping6 uses seconds for -W)
-    rtt=$(ping6 -c 1 -W 1 -q "$TARGET" 2>/dev/null | awk -F/ '/[Mm]in\/avg\/max/ {print $5; exit}')
+    RTT=$(ping6 -c 1 -W 1 -q "$TARGET" 2>/dev/null | awk -F/ '/[Mm]in\/avg\/max/ {print $5; exit}')
 
-    if [ -n "$rtt" ]; then
+    if [ -n "$RTT" ]; then
         if [ "$target_reachable" -ne 1 ]; then
             log "target '$TARGET' recovered"
             target_reachable=1
         fi
-        SQL=$(echo "$UPSERT_SQL" |
-            sed "s/%SLOT%/$slot/; s/%TS%/$sample_ts/; s/%RTT%/$rtt/")
-        if ! run_sql_command "$SQL" "write-sample" log_err >/dev/null; then
+        UPSERT_SQL=$(echo "$UPSERT_TMPL" |
+            sed "$SED_RENDER; s/%CURRENT_SLOT%/$CURRENT_SLOT/; s/%CURRENT_TS%/$CURRENT_TS/; s/%RTT%/$RTT/")
+        if ! run_sql_command "$UPSERT_SQL" "write-sample" log_err >/dev/null; then
             continue
         fi
-        slot=$(((slot + 1) % RING_BUFFER_SIZE))
+        CURRENT_SLOT=$(((CURRENT_SLOT + 1) % RING_BUFFER_SIZE))
     else
         if [ "$target_reachable" -eq 1 ]; then
             log_err "target '$TARGET' became unreachable"

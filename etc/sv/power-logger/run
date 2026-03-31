@@ -177,10 +177,10 @@ RING_BUFFER_SIZE=$((RING_BUFFER_DAYS * 86400 / INTERVAL_SEC))
 [ "$RING_BUFFER_SIZE" -ge 1 ] || RING_BUFFER_SIZE=1
 
 # SQL setup
-INIT_SCHEMA_SQL=$(
+INIT_SCHEMA_TMPL=$(
     cat <<'EOS'
 -- SQLite or PostgreSQL schema initialization
-CREATE TABLE IF NOT EXISTS watts (
+CREATE TABLE IF NOT EXISTS %TABLE% (
     slot      INTEGER PRIMARY KEY,
     ts        %TSTYPE% NOT NULL DEFAULT CURRENT_TIMESTAMP UNIQUE,
     power_w   REAL    NOT NULL,
@@ -189,28 +189,28 @@ CREATE TABLE IF NOT EXISTS watts (
 EOS
 )
 
-UPSERT_SQL=$(
+UPSERT_TMPL=$(
     cat <<'EOS'
 -- SQLite or PostgreSQL upsert
-INSERT INTO watts(slot, ts, power_w, loadpct) VALUES(
-    %SLOT%, '%TS%', %WATTS%, %LOADPCT%
+INSERT INTO %TABLE%(slot, ts, power_w, loadpct) VALUES(
+    %CURRENT_SLOT%, '%CURRENT_TS%', %WATTS%, %LOADPCT%
 ) ON CONFLICT(slot) DO UPDATE SET
-    ts       = '%TS%',
+    ts       = '%CURRENT_TS%',
     power_w  = EXCLUDED.power_w,
     loadpct  = EXCLUDED.loadpct;
 EOS
 )
 
-SELECT_LAST_SLOT="SELECT slot FROM watts ORDER BY ts DESC LIMIT 1;"
+LAST_SLOT_TMPL="SELECT slot FROM %TABLE% ORDER BY ts DESC LIMIT 1;"
 
 # Determine client command and schema substitutions
 case "$DB_TYPE" in
 sqlite)
-    SED_SCHEMA='s/%TSTYPE%/DATETIME/g'
+    SED_RENDER='s/%TABLE%/watts/g; s/%TSTYPE%/DATETIME/g'
     CLIENT_CMD="sqlite3 '$DB_FILE'"
     ;;
 postgres)
-    SED_SCHEMA='s/%TSTYPE%/TIMESTAMPTZ/g'
+    SED_RENDER='s/%TABLE%/power_logger.watts/g; s/%TSTYPE%/TIMESTAMPTZ/g'
     CLIENT_CMD="psql -qAt -h '$PGHOST' -p '$PGPORT' -U '$PGUSER' -d '$PGDATABASE'"
     ;;
 *)
@@ -220,16 +220,19 @@ postgres)
 esac
 
 # Initialize schema
-run_sql_command "$(echo "$INIT_SCHEMA_SQL" | sed "$SED_SCHEMA")" \
+INIT_SCHEMA_SQL=$(echo "$INIT_SCHEMA_TMPL" | sed "$SED_RENDER")
+run_sql_command "$INIT_SCHEMA_SQL" \
     "init-schema" \
     log_err >/dev/null
 log "Initialized power logger source='$POWER_SOURCE' db_type='$DB_TYPE' interval='$INTERVAL_SEC' ring_buffer_size='$RING_BUFFER_SIZE'"
 
 # Determine starting slot
-last_slot=$(run_sql_command "$SELECT_LAST_SLOT" "select-last-slot" log_err)
-case "$last_slot" in
-'' | *[!0-9]*) slot=0 ;;
-*) slot=$(((last_slot + 1) % RING_BUFFER_SIZE)) ;;
+LAST_SLOT_SQL=$(echo "$LAST_SLOT_TMPL" | sed "$SED_RENDER")
+LAST_SLOT=$(run_sql_command "$LAST_SLOT_SQL" "select-last-slot" log_err)
+
+case "$LAST_SLOT" in
+'' | *[!0-9]*) CURRENT_SLOT=0 ;;
+*) CURRENT_SLOT=$(((LAST_SLOT + 1) % RING_BUFFER_SIZE)) ;;
 esac
 
 # Sampling setup
@@ -272,7 +275,7 @@ while :; do
     sample_tick=$next_tick
     missed_intervals=$(((now - sample_tick) / INTERVAL_SEC))
     next_tick=$((sample_tick + (missed_intervals + 1) * INTERVAL_SEC))
-    sample_ts=$(format_sql_timestamp "$sample_tick")
+    CURRENT_TS=$(format_sql_timestamp "$sample_tick")
 
     case "$POWER_SOURCE" in
     apc)
@@ -298,10 +301,10 @@ while :; do
         ;;
     esac
 
-    SQL=$(echo "$UPSERT_SQL" |
-        sed "s/%SLOT%/$slot/; s/%TS%/$sample_ts/; s/%WATTS%/$WATTS/; s/%LOADPCT%/$LOADPCT/")
-    if ! run_sql_command "$SQL" "write-sample" log_err >/dev/null; then
+    UPSERT_SQL=$(echo "$UPSERT_TMPL" |
+        sed "$SED_RENDER; s/%CURRENT_SLOT%/$CURRENT_SLOT/; s/%CURRENT_TS%/$CURRENT_TS/; s/%WATTS%/$WATTS/; s/%LOADPCT%/$LOADPCT/")
+    if ! run_sql_command "$UPSERT_SQL" "write-sample" log_err >/dev/null; then
         continue
     fi
-    slot=$(((slot + 1) % RING_BUFFER_SIZE))
+    CURRENT_SLOT=$(((CURRENT_SLOT + 1) % RING_BUFFER_SIZE))
 done
