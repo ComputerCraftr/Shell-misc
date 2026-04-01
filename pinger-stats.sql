@@ -3,6 +3,11 @@
 -- Usage:
 --   sqlite3 /var/db/pinger/pings.db < pinger-stats.sql
 --
+-- Notes:
+--   * Samples are stored in UTC by the pinger service.
+--   * D1..D7 / W1..W4 / M1 are aligned to the current system local timezone's
+--     calendar-day boundaries.
+--
 -- This script produces a daily (last 7 days) columnar summary with W1..W4 weekly
 -- columns and an M1 last-30-days column. It uses a single metric pipeline for all periods.
 -- ----------------------------
@@ -37,44 +42,88 @@ weeks AS (
 periods AS (
     -- Per-day windows: idx = 1..7 (today=1, yesterday=2, ...)
     SELECT (d + 1) AS idx,
-        datetime('now', 'start of day', printf('-%d days', d)) AS start_ts,
-        datetime(
+        strftime(
+            '%Y-%m-%d %H:%M:%S+00:00',
             'now',
+            'localtime',
             'start of day',
             printf('-%d days', d),
-            '+1 day'
+            'utc'
+        ) AS start_ts,
+        strftime(
+            '%Y-%m-%d %H:%M:%S+00:00',
+            'now',
+            'localtime',
+            'start of day',
+            printf('-%d days', d),
+            '+1 day',
+            'utc'
         ) AS end_ts
     FROM days
     UNION ALL
     -- Weekly windows: idx = 8..11 (W1..W4, midnight-aligned)
     SELECT (w + 8) AS idx,
-        datetime(
+        strftime(
+            '%Y-%m-%d %H:%M:%S+00:00',
             'now',
+            'localtime',
             'start of day',
-            printf('-%d days', w * 7 + 6)
+            printf('-%d days', w * 7 + 6),
+            'utc'
         ) AS start_ts,
-        datetime(
+        strftime(
+            '%Y-%m-%d %H:%M:%S+00:00',
             'now',
+            'localtime',
             'start of day',
-            printf('%+d days', 1 - w * 7)
+            printf('%+d days', 1 - w * 7),
+            'utc'
         ) AS end_ts
     FROM weeks
     UNION ALL
     -- Monthly window: idx = 12 (last 30 days, midnight-aligned)
     SELECT 12 AS idx,
-        datetime('now', 'start of day', '-29 days') AS start_ts,
-        datetime('now', 'start of day', '+1 day') AS end_ts
+        strftime(
+            '%Y-%m-%d %H:%M:%S+00:00',
+            'now',
+            'localtime',
+            'start of day',
+            '-29 days',
+            'utc'
+        ) AS start_ts,
+        strftime(
+            '%Y-%m-%d %H:%M:%S+00:00',
+            'now',
+            'localtime',
+            'start of day',
+            '+1 day',
+            'utc'
+        ) AS end_ts
+),
+global_bounds AS (
+    SELECT MIN(start_ts) AS min_start_ts,
+        MAX(end_ts) AS max_end_ts
+    FROM periods
 ),
 -- ----------------------------
 -- Raw samples per period
 -- ----------------------------
+base_samples AS (
+    SELECT s.ts,
+        unixepoch(s.ts) AS tsec,
+        CAST(s.latency_ms AS REAL) AS rtt
+    FROM pings s,
+        global_bounds g
+    WHERE s.ts >= g.min_start_ts
+        AND s.ts < g.max_end_ts
+),
 samples AS (
     SELECT p.idx,
         s.ts,
-        CAST(strftime('%s', s.ts) AS INTEGER) AS tsec,
-        CAST(s.latency_ms AS REAL) AS rtt
+        s.tsec,
+        s.rtt
     FROM periods p
-        JOIN pings s ON s.ts >= p.start_ts
+        JOIN base_samples s ON s.ts >= p.start_ts
         AND s.ts < p.end_ts
 ),
 -- ----------------------------
@@ -169,23 +218,28 @@ value_counts AS (
 -- ----------------------------
 -- Diffs, jitter, loss, outages, clusters (per idx)
 -- ----------------------------
+diff_inputs AS (
+    SELECT idx,
+        ts,
+        tsec,
+        rtt,
+        LAG(rtt) OVER (
+            PARTITION BY idx
+            ORDER BY ts
+        ) AS prev_rtt,
+        LAG(tsec) OVER (
+            PARTITION BY idx
+            ORDER BY ts
+        ) AS prev_tsec
+    FROM samples
+),
 diffs AS (
     SELECT idx,
         ts,
         tsec,
-        ABS(
-            rtt - LAG(rtt) OVER (
-                PARTITION BY idx
-                ORDER BY ts
-            )
-        ) AS diff,
-        (
-            tsec - LAG(tsec) OVER (
-                PARTITION BY idx
-                ORDER BY ts
-            )
-        ) AS gap
-    FROM samples
+        ABS(rtt - prev_rtt) AS diff,
+        (tsec - prev_tsec) AS gap
+    FROM diff_inputs
 ),
 jitter AS (
     SELECT idx,
@@ -276,42 +330,50 @@ cluster_counts AS (
     FROM agg
     GROUP BY idx
 ),
-cluster_medians AS (
+cluster_lost_ranked AS (
     SELECT idx,
-        -- median cluster lost seconds
-        (
-            SELECT v
-            FROM (
-                    SELECT cluster_lost_sec AS v,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY idx
-                            ORDER BY cluster_lost_sec
-                        ) AS rn,
-                        COUNT(*) OVER (PARTITION BY idx) AS n
-                    FROM agg a2
-                    WHERE a2.idx = a.idx
-                ) s
-            WHERE rn = ((n + 1) / 2)
-        ) AS med_cluster_lost_sec,
-        -- median cluster span seconds
-        (
-            SELECT v
-            FROM (
-                    SELECT cluster_span_sec AS v,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY idx
-                            ORDER BY cluster_span_sec
-                        ) AS rn,
-                        COUNT(*) OVER (PARTITION BY idx) AS n
-                    FROM agg a3
-                    WHERE a3.idx = a.idx
-                ) s
-            WHERE rn = ((n + 1) / 2)
-        ) AS med_cluster_span_sec
+        cluster_lost_sec,
+        ROW_NUMBER() OVER (
+            PARTITION BY idx
+            ORDER BY cluster_lost_sec
+        ) AS rn,
+        COUNT(*) OVER (PARTITION BY idx) AS n
+    FROM agg
+),
+cluster_span_ranked AS (
+    SELECT idx,
+        cluster_span_sec,
+        ROW_NUMBER() OVER (
+            PARTITION BY idx
+            ORDER BY cluster_span_sec
+        ) AS rn,
+        COUNT(*) OVER (PARTITION BY idx) AS n
+    FROM agg
+),
+cluster_lost_medians AS (
+    SELECT idx,
+        MAX(cluster_lost_sec) AS med_cluster_lost_sec
+    FROM cluster_lost_ranked
+    WHERE rn = ((n + 1) / 2)
+    GROUP BY idx
+),
+cluster_span_medians AS (
+    SELECT idx,
+        MAX(cluster_span_sec) AS med_cluster_span_sec
+    FROM cluster_span_ranked
+    WHERE rn = ((n + 1) / 2)
+    GROUP BY idx
+),
+cluster_medians AS (
+    SELECT i.idx,
+        l.med_cluster_lost_sec,
+        s.med_cluster_span_sec
     FROM (
             SELECT DISTINCT idx
             FROM agg
-        ) a
+        ) i
+        LEFT JOIN cluster_lost_medians l USING (idx)
+        LEFT JOIN cluster_span_medians s USING (idx)
 ),
 -- ----------------------------
 -- Key/Value assembly for pivot

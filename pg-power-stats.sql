@@ -1,22 +1,22 @@
-.mode column --
--- power-stats.sql
--- Usage:
---   sqlite3 /var/db/power-logger/power-logger.db < power-stats.sql
+-- power summary (PostgreSQL)
+--
+-- Usage (with psql):
+--   psql -d power_logger_db -v ON_ERROR_STOP=1 -X \
+--        --pset=border=2 --pset=null='—' \
+--        -f pg-power-stats.sql
 --
 -- Notes:
+--   * Assumes database "power_logger_db", schema "power_logger", table "watts"
+--     with columns: ts (timestamp[tz]), power_w (real/double precision/numeric).
+--   * This script sets search_path to the "power_logger" schema; adjust if needed.
 --   * Samples are stored in UTC by the power-logger service.
---   * D1..D7 / W1..W4 / M1 are aligned to the current system local timezone's
---     calendar-day boundaries.
---   * Assumes table "watts" with columns:
---       ts (datetime/timestamp) and power_w (real/numeric).
---
--- This script produces a daily (last 7 days) columnar summary with W1..W4 weekly
--- columns and an M1 last-30-days column. It uses a single metric pipeline for all periods.
--- ----------------------------
--- Parameters
--- ----------------------------
+--   * D1..D7 / W1..W4 / M1 are aligned to the current PostgreSQL session
+--     timezone's calendar-day boundaries.
+--   * Mirrors the SQLite report: D1..D7 are calendar days (today=1),
+--     W1..W4 are rolling weeks, M1 is last 30 days.
+SET search_path TO power_logger;
 WITH RECURSIVE params AS (
-    SELECT 600 AS off_gap_s
+    SELECT 600::bigint AS off_gap_s
 ),
 -- ----------------------------
 -- Periods (idx = 1..7 per-day, idx = 8..11 weekly, idx = 12 monthly)
@@ -38,63 +38,50 @@ weeks AS (
 periods AS (
     -- Per-day windows: idx = 1..7 (today=1, yesterday=2, ...)
     SELECT (d + 1) AS idx,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            printf('-%d days', d),
-            'utc'
-        ) AS start_ts,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            printf('-%d days', d),
-            '+1 day',
-            'utc'
-        ) AS end_ts
+        (
+            date_trunc(
+                'day',
+                now() AT TIME ZONE current_setting('TIMEZONE')
+            ) - (d || ' days')::interval
+        ) AT TIME ZONE current_setting('TIMEZONE') AS start_ts,
+        (
+            date_trunc(
+                'day',
+                now() AT TIME ZONE current_setting('TIMEZONE')
+            ) - (d || ' days')::interval + interval '1 day'
+        ) AT TIME ZONE current_setting('TIMEZONE') AS end_ts
     FROM days
     UNION ALL
     -- Weekly windows: idx = 8..11 (W1..W4, midnight-aligned)
     SELECT (w + 8) AS idx,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            printf('-%d days', w * 7 + 6),
-            'utc'
-        ) AS start_ts,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            printf('%+d days', 1 - w * 7),
-            'utc'
-        ) AS end_ts
+        (
+            date_trunc(
+                'day',
+                now() AT TIME ZONE current_setting('TIMEZONE')
+            ) - ((w * 7 + 6) * interval '1 day')
+        ) AT TIME ZONE current_setting('TIMEZONE') AS start_ts,
+        (
+            date_trunc(
+                'day',
+                now() AT TIME ZONE current_setting('TIMEZONE')
+            ) + ((1 - w * 7) * interval '1 day')
+        ) AT TIME ZONE current_setting('TIMEZONE') AS end_ts
     FROM weeks
     UNION ALL
     -- Monthly window: idx = 12 (last 30 days, midnight-aligned)
     SELECT 12 AS idx,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            '-29 days',
-            'utc'
-        ) AS start_ts,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            '+1 day',
-            'utc'
-        ) AS end_ts
+        (
+            date_trunc(
+                'day',
+                now() AT TIME ZONE current_setting('TIMEZONE')
+            ) - interval '29 days'
+        ) AT TIME ZONE current_setting('TIMEZONE') AS start_ts,
+        (
+            date_trunc(
+                'day',
+                now() AT TIME ZONE current_setting('TIMEZONE')
+            ) + interval '1 day'
+        ) AT TIME ZONE current_setting('TIMEZONE') AS end_ts
 ),
 global_bounds AS (
     SELECT MIN(start_ts) AS min_start_ts,
@@ -104,16 +91,19 @@ global_bounds AS (
 -- ----------------------------
 -- Raw samples per period
 -- ----------------------------
-base_samples AS (
+base_samples AS MATERIALIZED (
     SELECT s.ts,
-        unixepoch(s.ts) AS tsec,
-        CAST(s.power_w AS REAL) AS watts
-    FROM watts s,
-        global_bounds g
+        extract(
+            epoch
+            FROM s.ts
+        )::bigint AS tsec,
+        s.power_w::double precision AS watts
+    FROM power_logger.watts s
+        CROSS JOIN global_bounds g
     WHERE s.ts >= g.min_start_ts
         AND s.ts < g.max_end_ts
 ),
-samples AS (
+samples AS MATERIALIZED (
     SELECT p.idx,
         s.ts,
         s.tsec,
@@ -212,12 +202,12 @@ percentiles AS (
         ) AS p50,
         MAX(
             CASE
-                WHEN rn = (CAST((n - 1) * 0.01 AS INTEGER) + 1) THEN watts
+                WHEN rn = ((n - 1) * 0.01)::bigint + 1 THEN watts
             END
         ) AS p01,
         MAX(
             CASE
-                WHEN rn = (CAST((n - 1) * 0.99 AS INTEGER) + 1) THEN watts
+                WHEN rn = ((n - 1) * 0.99)::bigint + 1 THEN watts
             END
         ) AS p99
     FROM ordered o
@@ -226,7 +216,7 @@ percentiles AS (
 rounded AS (
     SELECT idx,
         watts,
-        CAST(ROUND(watts) AS INTEGER) AS watts_whole
+        round(watts)::integer AS watts_whole
     FROM samples
 ),
 mode_calc AS (
@@ -253,13 +243,13 @@ value_counts AS (
     SELECT r.idx,
         SUM(
             CASE
-                WHEN r.watts_whole = CAST(ROUND(e.mean_watts) AS INTEGER) THEN 1
+                WHEN r.watts_whole = round(e.mean_watts)::integer THEN 1
                 ELSE 0
             END
         ) AS mean_count,
         SUM(
             CASE
-                WHEN r.watts_whole = CAST(ROUND(p.p50) AS INTEGER) THEN 1
+                WHEN r.watts_whole = round(p.p50)::integer THEN 1
                 ELSE 0
             END
         ) AS median_count,
@@ -369,16 +359,14 @@ SELECT metric,
             'Median count',
             'Mode count',
             'Sample count'
-        ) THEN CAST(
-            COALESCE(
-                MAX(
-                    CASE
-                        WHEN idx = 1 THEN val
-                    END
-                ),
-                0
-            ) AS INTEGER
-        )
+        ) THEN COALESCE(
+            MAX(
+                CASE
+                    WHEN idx = 1 THEN val
+                END
+            ),
+            0
+        )::numeric
         ELSE ROUND(
             COALESCE(
                 MAX(
@@ -387,7 +375,7 @@ SELECT metric,
                     END
                 ),
                 0
-            ),
+            )::numeric,
             3
         )
     END AS D1,
@@ -397,16 +385,14 @@ SELECT metric,
             'Median count',
             'Mode count',
             'Sample count'
-        ) THEN CAST(
-            COALESCE(
-                MAX(
-                    CASE
-                        WHEN idx = 2 THEN val
-                    END
-                ),
-                0
-            ) AS INTEGER
-        )
+        ) THEN COALESCE(
+            MAX(
+                CASE
+                    WHEN idx = 2 THEN val
+                END
+            ),
+            0
+        )::numeric
         ELSE ROUND(
             COALESCE(
                 MAX(
@@ -415,7 +401,7 @@ SELECT metric,
                     END
                 ),
                 0
-            ),
+            )::numeric,
             3
         )
     END AS D2,
@@ -425,16 +411,14 @@ SELECT metric,
             'Median count',
             'Mode count',
             'Sample count'
-        ) THEN CAST(
-            COALESCE(
-                MAX(
-                    CASE
-                        WHEN idx = 3 THEN val
-                    END
-                ),
-                0
-            ) AS INTEGER
-        )
+        ) THEN COALESCE(
+            MAX(
+                CASE
+                    WHEN idx = 3 THEN val
+                END
+            ),
+            0
+        )::numeric
         ELSE ROUND(
             COALESCE(
                 MAX(
@@ -443,7 +427,7 @@ SELECT metric,
                     END
                 ),
                 0
-            ),
+            )::numeric,
             3
         )
     END AS D3,
@@ -453,16 +437,14 @@ SELECT metric,
             'Median count',
             'Mode count',
             'Sample count'
-        ) THEN CAST(
-            COALESCE(
-                MAX(
-                    CASE
-                        WHEN idx = 4 THEN val
-                    END
-                ),
-                0
-            ) AS INTEGER
-        )
+        ) THEN COALESCE(
+            MAX(
+                CASE
+                    WHEN idx = 4 THEN val
+                END
+            ),
+            0
+        )::numeric
         ELSE ROUND(
             COALESCE(
                 MAX(
@@ -471,7 +453,7 @@ SELECT metric,
                     END
                 ),
                 0
-            ),
+            )::numeric,
             3
         )
     END AS D4,
@@ -481,16 +463,14 @@ SELECT metric,
             'Median count',
             'Mode count',
             'Sample count'
-        ) THEN CAST(
-            COALESCE(
-                MAX(
-                    CASE
-                        WHEN idx = 5 THEN val
-                    END
-                ),
-                0
-            ) AS INTEGER
-        )
+        ) THEN COALESCE(
+            MAX(
+                CASE
+                    WHEN idx = 5 THEN val
+                END
+            ),
+            0
+        )::numeric
         ELSE ROUND(
             COALESCE(
                 MAX(
@@ -499,7 +479,7 @@ SELECT metric,
                     END
                 ),
                 0
-            ),
+            )::numeric,
             3
         )
     END AS D5,
@@ -509,16 +489,14 @@ SELECT metric,
             'Median count',
             'Mode count',
             'Sample count'
-        ) THEN CAST(
-            COALESCE(
-                MAX(
-                    CASE
-                        WHEN idx = 6 THEN val
-                    END
-                ),
-                0
-            ) AS INTEGER
-        )
+        ) THEN COALESCE(
+            MAX(
+                CASE
+                    WHEN idx = 6 THEN val
+                END
+            ),
+            0
+        )::numeric
         ELSE ROUND(
             COALESCE(
                 MAX(
@@ -527,7 +505,7 @@ SELECT metric,
                     END
                 ),
                 0
-            ),
+            )::numeric,
             3
         )
     END AS D6,
@@ -537,16 +515,14 @@ SELECT metric,
             'Median count',
             'Mode count',
             'Sample count'
-        ) THEN CAST(
-            COALESCE(
-                MAX(
-                    CASE
-                        WHEN idx = 7 THEN val
-                    END
-                ),
-                0
-            ) AS INTEGER
-        )
+        ) THEN COALESCE(
+            MAX(
+                CASE
+                    WHEN idx = 7 THEN val
+                END
+            ),
+            0
+        )::numeric
         ELSE ROUND(
             COALESCE(
                 MAX(
@@ -555,7 +531,7 @@ SELECT metric,
                     END
                 ),
                 0
-            ),
+            )::numeric,
             3
         )
     END AS D7,
@@ -565,16 +541,14 @@ SELECT metric,
             'Median count',
             'Mode count',
             'Sample count'
-        ) THEN CAST(
-            COALESCE(
-                MAX(
-                    CASE
-                        WHEN idx = 8 THEN val
-                    END
-                ),
-                0
-            ) AS INTEGER
-        )
+        ) THEN COALESCE(
+            MAX(
+                CASE
+                    WHEN idx = 8 THEN val
+                END
+            ),
+            0
+        )::numeric
         ELSE ROUND(
             COALESCE(
                 MAX(
@@ -583,7 +557,7 @@ SELECT metric,
                     END
                 ),
                 0
-            ),
+            )::numeric,
             3
         )
     END AS W1,
@@ -593,16 +567,14 @@ SELECT metric,
             'Median count',
             'Mode count',
             'Sample count'
-        ) THEN CAST(
-            COALESCE(
-                MAX(
-                    CASE
-                        WHEN idx = 9 THEN val
-                    END
-                ),
-                0
-            ) AS INTEGER
-        )
+        ) THEN COALESCE(
+            MAX(
+                CASE
+                    WHEN idx = 9 THEN val
+                END
+            ),
+            0
+        )::numeric
         ELSE ROUND(
             COALESCE(
                 MAX(
@@ -611,7 +583,7 @@ SELECT metric,
                     END
                 ),
                 0
-            ),
+            )::numeric,
             3
         )
     END AS W2,
@@ -621,16 +593,14 @@ SELECT metric,
             'Median count',
             'Mode count',
             'Sample count'
-        ) THEN CAST(
-            COALESCE(
-                MAX(
-                    CASE
-                        WHEN idx = 10 THEN val
-                    END
-                ),
-                0
-            ) AS INTEGER
-        )
+        ) THEN COALESCE(
+            MAX(
+                CASE
+                    WHEN idx = 10 THEN val
+                END
+            ),
+            0
+        )::numeric
         ELSE ROUND(
             COALESCE(
                 MAX(
@@ -639,7 +609,7 @@ SELECT metric,
                     END
                 ),
                 0
-            ),
+            )::numeric,
             3
         )
     END AS W3,
@@ -649,16 +619,14 @@ SELECT metric,
             'Median count',
             'Mode count',
             'Sample count'
-        ) THEN CAST(
-            COALESCE(
-                MAX(
-                    CASE
-                        WHEN idx = 11 THEN val
-                    END
-                ),
-                0
-            ) AS INTEGER
-        )
+        ) THEN COALESCE(
+            MAX(
+                CASE
+                    WHEN idx = 11 THEN val
+                END
+            ),
+            0
+        )::numeric
         ELSE ROUND(
             COALESCE(
                 MAX(
@@ -667,7 +635,7 @@ SELECT metric,
                     END
                 ),
                 0
-            ),
+            )::numeric,
             3
         )
     END AS W4,
@@ -677,16 +645,14 @@ SELECT metric,
             'Median count',
             'Mode count',
             'Sample count'
-        ) THEN CAST(
-            COALESCE(
-                MAX(
-                    CASE
-                        WHEN idx = 12 THEN val
-                    END
-                ),
-                0
-            ) AS INTEGER
-        )
+        ) THEN COALESCE(
+            MAX(
+                CASE
+                    WHEN idx = 12 THEN val
+                END
+            ),
+            0
+        )::numeric
         ELSE ROUND(
             COALESCE(
                 MAX(
@@ -695,7 +661,7 @@ SELECT metric,
                     END
                 ),
                 0
-            ),
+            )::numeric,
             3
         )
     END AS M1
