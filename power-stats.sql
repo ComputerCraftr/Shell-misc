@@ -8,20 +8,29 @@
 --   * D1..D7 / W1..W4 / M1 are aligned to the current system local timezone's
 --     calendar-day boundaries.
 --   * Assumes table "watts" with columns:
---       ts (datetime/timestamp) and power_w (real/numeric).
---
--- This script produces a daily (last 7 days) columnar summary with W1..W4 weekly
--- columns and an M1 last-30-days column. It uses a single metric pipeline for all periods.
--- ----------------------------
--- Parameters
--- ----------------------------
-WITH RECURSIVE params AS (
-    SELECT 600 AS off_gap_s
-),
--- ----------------------------
--- Periods (idx = 1..7 per-day, idx = 8..11 weekly, idx = 12 monthly)
--- ----------------------------
-days AS (
+--       ts (datetime/timestamp), power_w (real/numeric).
+--   * Profiling:
+--       sqlite3 -cmd "PRAGMA temp_store=MEMORY;" \
+--               -cmd "PRAGMA cache_size=-131072;" \
+--               -cmd ".timer on" -cmd ".stats on" \
+--               /var/db/power-logger/power-logger.db < power-stats.sql
+--   * Planner inspection:
+--       sqlite3 -cmd ".eqp full" /var/db/power-logger/power-logger.db < power-stats.sql
+DROP TABLE IF EXISTS temp.report_power_periods;
+DROP TABLE IF EXISTS temp.report_power_params;
+DROP TABLE IF EXISTS temp.report_power_stage;
+DROP TABLE IF EXISTS temp.report_power_intervals;
+DROP TABLE IF EXISTS temp.report_power_energy_stats;
+DROP TABLE IF EXISTS temp.report_power_basic;
+DROP TABLE IF EXISTS temp.report_power_counts;
+DROP TABLE IF EXISTS temp.report_power_ordered;
+DROP TABLE IF EXISTS temp.report_power_percentiles;
+DROP TABLE IF EXISTS temp.report_power_mode_calc;
+DROP TABLE IF EXISTS temp.report_power_mode;
+DROP TABLE IF EXISTS temp.report_power_value_counts;
+CREATE TEMP TABLE report_power_params AS
+SELECT 600 AS off_gap_s;
+CREATE TEMP TABLE report_power_periods AS WITH RECURSIVE days AS (
     SELECT 0 AS d
     UNION ALL
     SELECT d + 1
@@ -34,95 +43,91 @@ weeks AS (
     SELECT w + 1
     FROM weeks
     WHERE w < 3
-),
-periods AS (
-    -- Per-day windows: idx = 1..7 (today=1, yesterday=2, ...)
-    SELECT (d + 1) AS idx,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            printf('-%d days', d),
-            'utc'
-        ) AS start_ts,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            printf('-%d days', d),
-            '+1 day',
-            'utc'
-        ) AS end_ts
-    FROM days
-    UNION ALL
-    -- Weekly windows: idx = 8..11 (W1..W4, midnight-aligned)
-    SELECT (w + 8) AS idx,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            printf('-%d days', w * 7 + 6),
-            'utc'
-        ) AS start_ts,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            printf('%+d days', 1 - w * 7),
-            'utc'
-        ) AS end_ts
-    FROM weeks
-    UNION ALL
-    -- Monthly window: idx = 12 (last 30 days, midnight-aligned)
-    SELECT 12 AS idx,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            '-29 days',
-            'utc'
-        ) AS start_ts,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            '+1 day',
-            'utc'
-        ) AS end_ts
-),
-global_bounds AS (
-    SELECT MIN(start_ts) AS min_start_ts,
-        MAX(end_ts) AS max_end_ts
-    FROM periods
-),
--- ----------------------------
--- Raw samples per period
--- ----------------------------
-base_samples AS (
-    SELECT s.ts,
-        unixepoch(s.ts) AS tsec,
-        CAST(s.power_w AS REAL) AS watts
-    FROM watts s,
-        global_bounds g
-    WHERE s.ts >= g.min_start_ts
-        AND s.ts < g.max_end_ts
-),
-samples AS (
-    SELECT p.idx,
-        s.ts,
-        s.tsec,
-        s.watts
-    FROM periods p
-        JOIN base_samples s ON s.ts >= p.start_ts
-        AND s.ts < p.end_ts
-),
-interval_inputs AS (
+)
+SELECT (d + 1) AS idx,
+    strftime(
+        '%Y-%m-%d %H:%M:%S+00:00',
+        'now',
+        'localtime',
+        'start of day',
+        printf('-%d days', d),
+        'utc'
+    ) AS start_ts,
+    strftime(
+        '%Y-%m-%d %H:%M:%S+00:00',
+        'now',
+        'localtime',
+        'start of day',
+        printf('-%d days', d),
+        '+1 day',
+        'utc'
+    ) AS end_ts
+FROM days
+UNION ALL
+SELECT (w + 8) AS idx,
+    strftime(
+        '%Y-%m-%d %H:%M:%S+00:00',
+        'now',
+        'localtime',
+        'start of day',
+        printf('-%d days', w * 7 + 6),
+        'utc'
+    ) AS start_ts,
+    strftime(
+        '%Y-%m-%d %H:%M:%S+00:00',
+        'now',
+        'localtime',
+        'start of day',
+        printf('%+d days', 1 - w * 7),
+        'utc'
+    ) AS end_ts
+FROM weeks
+UNION ALL
+SELECT 12 AS idx,
+    strftime(
+        '%Y-%m-%d %H:%M:%S+00:00',
+        'now',
+        'localtime',
+        'start of day',
+        '-29 days',
+        'utc'
+    ) AS start_ts,
+    strftime(
+        '%Y-%m-%d %H:%M:%S+00:00',
+        'now',
+        'localtime',
+        'start of day',
+        '+1 day',
+        'utc'
+    ) AS end_ts;
+CREATE TEMP TABLE report_power_stage (
+    idx INTEGER NOT NULL,
+    ts TEXT NOT NULL,
+    tsec INTEGER NOT NULL,
+    watts REAL NOT NULL,
+    watts_whole INTEGER NOT NULL
+);
+INSERT INTO report_power_stage(idx, ts, tsec, watts, watts_whole)
+SELECT p.idx,
+    s.ts,
+    unixepoch(s.ts) AS tsec,
+    CAST(s.power_w AS REAL) AS watts,
+    CAST(ROUND(s.power_w) AS INTEGER) AS watts_whole
+FROM watts s
+    JOIN report_power_periods p ON s.ts >= p.start_ts
+    AND s.ts < p.end_ts
+WHERE s.ts >= (
+        SELECT MIN(start_ts)
+        FROM report_power_periods
+    )
+    AND s.ts < (
+        SELECT MAX(end_ts)
+        FROM report_power_periods
+    )
+ORDER BY p.idx,
+    s.ts;
+CREATE INDEX report_power_stage_idx_ts ON report_power_stage(idx, ts);
+CREATE TEMP TABLE report_power_intervals AS WITH interval_inputs AS (
     SELECT idx,
         watts,
         tsec,
@@ -130,190 +135,191 @@ interval_inputs AS (
             PARTITION BY idx
             ORDER BY tsec
         ) AS next_tsec
-    FROM samples
-),
-intervals AS (
-    SELECT idx,
-        watts,
-        tsec,
-        next_tsec,
-        (next_tsec - tsec) AS gap_s
-    FROM interval_inputs
-),
-energy_stats AS (
-    SELECT i.idx,
-        SUM(
-            CASE
-                WHEN i.gap_s IS NOT NULL
-                AND i.gap_s <= p.off_gap_s THEN i.watts * i.gap_s
-                ELSE 0
-            END
-        ) AS watt_seconds,
-        SUM(
-            CASE
-                WHEN i.gap_s IS NOT NULL
-                AND i.gap_s <= p.off_gap_s THEN i.gap_s
-                ELSE 0
-            END
-        ) AS total_seconds,
+    FROM report_power_stage
+)
+SELECT idx,
+    watts,
+    tsec,
+    next_tsec,
+    (next_tsec - tsec) AS gap_s
+FROM interval_inputs;
+CREATE INDEX report_power_intervals_idx ON report_power_intervals(idx, tsec);
+CREATE TEMP TABLE report_power_energy_stats AS
+SELECT idx,
+    SUM(
         CASE
-            WHEN SUM(
-                CASE
-                    WHEN i.gap_s IS NOT NULL
-                    AND i.gap_s <= p.off_gap_s THEN i.gap_s
-                    ELSE 0
-                END
-            ) > 0 THEN SUM(
-                CASE
-                    WHEN i.gap_s IS NOT NULL
-                    AND i.gap_s <= p.off_gap_s THEN i.watts * i.gap_s
-                    ELSE 0
-                END
-            ) / SUM(
-                CASE
-                    WHEN i.gap_s IS NOT NULL
-                    AND i.gap_s <= p.off_gap_s THEN i.gap_s
-                    ELSE 0
-                END
-            )
-            ELSE 0.0
-        END AS mean_watts
-    FROM intervals i
-        CROSS JOIN params p
-    GROUP BY i.idx
-),
--- ----------------------------
--- Basic stats & percentiles (per idx)
--- ----------------------------
-basic AS (
-    SELECT idx,
-        MIN(watts) AS min_watts,
-        MAX(watts) AS max_watts
-    FROM samples
-    GROUP BY idx
-),
-ordered AS (
-    SELECT idx,
-        watts,
-        ROW_NUMBER() OVER (
-            PARTITION BY idx
-            ORDER BY watts
-        ) AS rn,
-        COUNT(*) OVER (PARTITION BY idx) AS n
-    FROM samples
-),
-percentiles AS (
-    -- Median index = (n+1)/2 ; P01 = floor((n-1)*0.01)+1 ; P99 = floor((n-1)*0.99)+1
-    SELECT o.idx,
-        MAX(
+            WHEN gap_s IS NOT NULL
+            AND gap_s <= (
+                SELECT off_gap_s
+                FROM report_power_params
+            ) THEN watts * gap_s
+            ELSE 0
+        END
+    ) AS watt_seconds,
+    SUM(
+        CASE
+            WHEN gap_s IS NOT NULL
+            AND gap_s <= (
+                SELECT off_gap_s
+                FROM report_power_params
+            ) THEN gap_s
+            ELSE 0
+        END
+    ) AS total_seconds,
+    CASE
+        WHEN SUM(
             CASE
-                WHEN rn = ((n + 1) / 2) THEN watts
+                WHEN gap_s IS NOT NULL
+                AND gap_s <= (
+                    SELECT off_gap_s
+                    FROM report_power_params
+                ) THEN gap_s
+                ELSE 0
             END
-        ) AS p50,
-        MAX(
+        ) > 0 THEN SUM(
             CASE
-                WHEN rn = (CAST((n - 1) * 0.01 AS INTEGER) + 1) THEN watts
+                WHEN gap_s IS NOT NULL
+                AND gap_s <= (
+                    SELECT off_gap_s
+                    FROM report_power_params
+                ) THEN watts * gap_s
+                ELSE 0
             END
-        ) AS p01,
-        MAX(
+        ) / SUM(
             CASE
-                WHEN rn = (CAST((n - 1) * 0.99 AS INTEGER) + 1) THEN watts
+                WHEN gap_s IS NOT NULL
+                AND gap_s <= (
+                    SELECT off_gap_s
+                    FROM report_power_params
+                ) THEN gap_s
+                ELSE 0
             END
-        ) AS p99
-    FROM ordered o
-    GROUP BY o.idx
-),
-rounded AS (
-    SELECT idx,
-        watts,
-        CAST(ROUND(watts) AS INTEGER) AS watts_whole
-    FROM samples
-),
-mode_calc AS (
+        )
+        ELSE 0.0
+    END AS mean_watts
+FROM report_power_intervals
+GROUP BY idx;
+CREATE INDEX report_power_stage_idx_watts ON report_power_stage(idx, watts, ts);
+CREATE INDEX report_power_stage_idx_whole ON report_power_stage(idx, watts_whole);
+CREATE TEMP TABLE report_power_basic AS
+SELECT idx,
+    MIN(watts) AS min_watts,
+    MAX(watts) AS max_watts
+FROM report_power_stage
+GROUP BY idx;
+CREATE TEMP TABLE report_power_counts AS
+SELECT idx,
+    COUNT(*) AS n
+FROM report_power_stage
+GROUP BY idx;
+CREATE UNIQUE INDEX report_power_counts_idx ON report_power_counts(idx);
+CREATE TEMP TABLE report_power_ordered AS
+SELECT idx,
+    ROW_NUMBER() OVER (
+        PARTITION BY idx
+        ORDER BY watts
+    ) AS rn,
+    watts
+FROM report_power_stage;
+CREATE INDEX report_power_ordered_idx ON report_power_ordered(idx, rn);
+CREATE TEMP TABLE report_power_percentiles AS
+SELECT c.idx,
+    o50.watts AS p50,
+    o01.watts AS p01,
+    o99.watts AS p99
+FROM report_power_counts c
+    LEFT JOIN report_power_ordered o50 ON o50.idx = c.idx
+    AND o50.rn = ((c.n + 1) / 2)
+    LEFT JOIN report_power_ordered o01 ON o01.idx = c.idx
+    AND o01.rn = (CAST((c.n - 1) * 0.01 AS INTEGER) + 1)
+    LEFT JOIN report_power_ordered o99 ON o99.idx = c.idx
+    AND o99.rn = (CAST((c.n - 1) * 0.99 AS INTEGER) + 1);
+CREATE TEMP TABLE report_power_mode_calc AS WITH grouped AS (
     SELECT idx,
         watts_whole,
-        COUNT(*) AS cnt,
-        ROW_NUMBER() OVER (
-            PARTITION BY idx
-            ORDER BY COUNT(*) DESC,
-                watts_whole DESC
-        ) AS rn
-    FROM rounded
+        COUNT(*) AS cnt
+    FROM report_power_stage
     GROUP BY idx,
         watts_whole
-),
-mode AS (
-    SELECT idx,
-        watts_whole AS mode_watts,
-        cnt AS mode_count
-    FROM mode_calc
-    WHERE rn = 1
-),
-value_counts AS (
-    SELECT r.idx,
-        SUM(
-            CASE
-                WHEN r.watts_whole = CAST(ROUND(e.mean_watts) AS INTEGER) THEN 1
-                ELSE 0
-            END
-        ) AS mean_count,
-        SUM(
-            CASE
-                WHEN r.watts_whole = CAST(ROUND(p.p50) AS INTEGER) THEN 1
-                ELSE 0
-            END
-        ) AS median_count,
-        MAX(m.mode_count) AS mode_count
-    FROM rounded r
-        JOIN energy_stats e USING (idx)
-        JOIN percentiles p USING (idx)
-        LEFT JOIN mode m USING (idx)
-    GROUP BY r.idx
-),
-observed AS (
+)
+SELECT idx,
+    watts_whole,
+    cnt,
+    ROW_NUMBER() OVER (
+        PARTITION BY idx
+        ORDER BY cnt DESC,
+            watts_whole DESC
+    ) AS rn
+FROM grouped;
+CREATE INDEX report_power_mode_calc_idx ON report_power_mode_calc(idx, rn);
+CREATE TEMP TABLE report_power_mode AS
+SELECT idx,
+    watts_whole AS mode_watts,
+    cnt AS mode_count
+FROM report_power_mode_calc
+WHERE rn = 1;
+CREATE TEMP TABLE report_power_value_counts AS
+SELECT e.idx,
+    (
+        SELECT COUNT(*)
+        FROM report_power_stage s
+        WHERE s.idx = e.idx
+            AND s.watts_whole = CAST(ROUND(e.mean_watts) AS INTEGER)
+    ) AS mean_count,
+    CASE
+        WHEN p.p50 IS NULL THEN 0
+        ELSE (
+            SELECT COUNT(*)
+            FROM report_power_stage s
+            WHERE s.idx = e.idx
+                AND s.watts_whole = CAST(ROUND(p.p50) AS INTEGER)
+        )
+    END AS median_count,
+    COALESCE(m.mode_count, 0) AS mode_count
+FROM report_power_energy_stats e
+    LEFT JOIN report_power_percentiles p USING (idx)
+    LEFT JOIN report_power_mode m USING (idx);
+WITH observed AS (
     SELECT idx,
         COUNT(*) AS sample_count
-    FROM samples
+    FROM report_power_stage
     GROUP BY idx
 ),
--- ----------------------------
--- Key/Value assembly for pivot
--- ----------------------------
 kv AS (
     SELECT 'Minimum (W)' AS metric,
         idx,
         min_watts AS val
-    FROM basic
+    FROM report_power_basic
     UNION ALL
     SELECT 'Maximum (W)',
         idx,
         max_watts
-    FROM basic
+    FROM report_power_basic
     UNION ALL
     SELECT 'Mean (W)',
         idx,
         mean_watts
-    FROM energy_stats
+    FROM report_power_energy_stats
     UNION ALL
     SELECT 'Median (W)',
         idx,
         p50
-    FROM percentiles
+    FROM report_power_percentiles
     UNION ALL
     SELECT 'Mode (W)',
         idx,
         mode_watts
-    FROM mode
+    FROM report_power_mode
     UNION ALL
     SELECT '1st percentile (W)',
         idx,
         p01
-    FROM percentiles
+    FROM report_power_percentiles
     UNION ALL
     SELECT '99th percentile (W)',
         idx,
         p99
-    FROM percentiles
+    FROM report_power_percentiles
     UNION ALL
     SELECT 'Total energy (kWh)',
         idx,
@@ -321,7 +327,7 @@ kv AS (
             WHEN watt_seconds IS NULL THEN 0.0
             ELSE watt_seconds / 3600000.0
         END
-    FROM energy_stats
+    FROM report_power_energy_stats
     UNION ALL
     SELECT 'Cost @ $0.10/kWh',
         idx,
@@ -329,7 +335,7 @@ kv AS (
             WHEN watt_seconds IS NULL THEN 0.0
             ELSE (watt_seconds / 3600000.0) * 0.10
         END
-    FROM energy_stats
+    FROM report_power_energy_stats
     UNION ALL
     SELECT 'Cost @ $0.15/kWh',
         idx,
@@ -337,31 +343,28 @@ kv AS (
             WHEN watt_seconds IS NULL THEN 0.0
             ELSE (watt_seconds / 3600000.0) * 0.15
         END
-    FROM energy_stats
+    FROM report_power_energy_stats
     UNION ALL
     SELECT 'Mean count',
         idx,
         mean_count
-    FROM value_counts
+    FROM report_power_value_counts
     UNION ALL
     SELECT 'Median count',
         idx,
         median_count
-    FROM value_counts
+    FROM report_power_value_counts
     UNION ALL
     SELECT 'Mode count',
         idx,
         mode_count
-    FROM value_counts
+    FROM report_power_value_counts
     UNION ALL
     SELECT 'Sample count',
         idx,
         sample_count
     FROM observed
-) -- ----------------------------
--- Final pivot: D1..D7 (days), W1..W4 (weeks), M1 (month)
--- Integers rendered without decimals; others with 3 decimals
--- ----------------------------
+)
 SELECT metric,
     CASE
         WHEN metric IN (
@@ -717,5 +720,5 @@ ORDER BY CASE
         WHEN 'Median count' THEN 12
         WHEN 'Mode count' THEN 13
         WHEN 'Sample count' THEN 14
-        ELSE 99
+        ELSE 999
     END;

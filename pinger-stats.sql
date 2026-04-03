@@ -7,25 +7,37 @@
 --   * Samples are stored in UTC by the pinger service.
 --   * D1..D7 / W1..W4 / M1 are aligned to the current system local timezone's
 --     calendar-day boundaries.
+--   * Profiling:
+--       sqlite3 -cmd "PRAGMA temp_store=MEMORY;" \
+--               -cmd "PRAGMA cache_size=-131072;" \
+--               -cmd ".timer on" -cmd ".stats on" \
+--               /var/db/pinger/pings.db < pinger-stats.sql
+--   * Planner inspection:
+--       sqlite3 -cmd ".eqp full" /var/db/pinger/pings.db < pinger-stats.sql
 --
--- This script produces a daily (last 7 days) columnar summary with W1..W4 weekly
--- columns and an M1 last-30-days column. It uses a single metric pipeline for all periods.
--- ----------------------------
--- Parameters
--- ----------------------------
-WITH RECURSIVE params AS (
-    -- consider a gap > 2s as a loss
-    SELECT 2 AS loss_gap_s,
-        600 AS heal_s -- cluster healing interval seconds
-),
-label AS (
-    SELECT 'Event clusters (' || heal_s || 's)' AS clusters_label
-    FROM params
-),
--- ----------------------------
--- Periods (idx = 1..7 per-day, idx = 8..11 weekly, idx = 12 monthly)
--- ----------------------------
-days AS (
+-- This script uses one staged temp table for the last-30-day bounded sample set
+-- expanded into D1..D7 / W1..W4 / M1 buckets. The temporal and value pipelines
+-- then build only the indexes they need.
+DROP TABLE IF EXISTS temp.report_pinger_periods;
+DROP TABLE IF EXISTS temp.report_pinger_params;
+DROP TABLE IF EXISTS temp.report_pinger_stage;
+DROP TABLE IF EXISTS temp.report_pinger_diffs;
+DROP TABLE IF EXISTS temp.report_pinger_outages;
+DROP TABLE IF EXISTS temp.report_pinger_agg;
+DROP TABLE IF EXISTS temp.report_pinger_cluster_lost_ranked;
+DROP TABLE IF EXISTS temp.report_pinger_cluster_span_ranked;
+DROP TABLE IF EXISTS temp.report_pinger_basic;
+DROP TABLE IF EXISTS temp.report_pinger_counts;
+DROP TABLE IF EXISTS temp.report_pinger_ordered;
+DROP TABLE IF EXISTS temp.report_pinger_percentiles;
+DROP TABLE IF EXISTS temp.report_pinger_mode_calc;
+DROP TABLE IF EXISTS temp.report_pinger_mode;
+DROP TABLE IF EXISTS temp.report_pinger_value_counts;
+CREATE TEMP TABLE report_pinger_params AS
+SELECT 2 AS loss_gap_s,
+    600 AS heal_s,
+    'Event clusters (600s)' AS clusters_label;
+CREATE TEMP TABLE report_pinger_periods AS WITH RECURSIVE days AS (
     SELECT 0 AS d
     UNION ALL
     SELECT d + 1
@@ -38,187 +50,91 @@ weeks AS (
     SELECT w + 1
     FROM weeks
     WHERE w < 3
-),
-periods AS (
-    -- Per-day windows: idx = 1..7 (today=1, yesterday=2, ...)
-    SELECT (d + 1) AS idx,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            printf('-%d days', d),
-            'utc'
-        ) AS start_ts,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            printf('-%d days', d),
-            '+1 day',
-            'utc'
-        ) AS end_ts
-    FROM days
-    UNION ALL
-    -- Weekly windows: idx = 8..11 (W1..W4, midnight-aligned)
-    SELECT (w + 8) AS idx,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            printf('-%d days', w * 7 + 6),
-            'utc'
-        ) AS start_ts,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            printf('%+d days', 1 - w * 7),
-            'utc'
-        ) AS end_ts
-    FROM weeks
-    UNION ALL
-    -- Monthly window: idx = 12 (last 30 days, midnight-aligned)
-    SELECT 12 AS idx,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            '-29 days',
-            'utc'
-        ) AS start_ts,
-        strftime(
-            '%Y-%m-%d %H:%M:%S+00:00',
-            'now',
-            'localtime',
-            'start of day',
-            '+1 day',
-            'utc'
-        ) AS end_ts
-),
-global_bounds AS (
-    SELECT MIN(start_ts) AS min_start_ts,
-        MAX(end_ts) AS max_end_ts
-    FROM periods
-),
--- ----------------------------
--- Raw samples per period
--- ----------------------------
-base_samples AS (
-    SELECT s.ts,
-        unixepoch(s.ts) AS tsec,
-        CAST(s.latency_ms AS REAL) AS rtt
-    FROM pings s,
-        global_bounds g
-    WHERE s.ts >= g.min_start_ts
-        AND s.ts < g.max_end_ts
-),
-samples AS (
-    SELECT p.idx,
-        s.ts,
-        s.tsec,
-        s.rtt
-    FROM periods p
-        JOIN base_samples s ON s.ts >= p.start_ts
-        AND s.ts < p.end_ts
-),
--- ----------------------------
--- Basic stats & percentiles (per idx)
--- ----------------------------
-basic AS (
-    SELECT idx,
-        MIN(rtt) AS min_rtt,
-        MAX(rtt) AS max_rtt,
-        AVG(rtt) AS avg_rtt
-    FROM samples
-    GROUP BY idx
-),
-ordered AS (
-    SELECT idx,
-        rtt,
-        ROW_NUMBER() OVER (
-            PARTITION BY idx
-            ORDER BY rtt
-        ) AS rn,
-        COUNT(*) OVER (PARTITION BY idx) AS n
-    FROM samples
-),
-percentiles AS (
-    -- Median index = (n+1)/2 ; P01 = floor((n-1)*0.01)+1 ; P99 = floor((n-1)*0.99)+1
-    SELECT o.idx,
-        MAX(
-            CASE
-                WHEN rn = ((n + 1) / 2) THEN rtt
-            END
-        ) AS p50,
-        MAX(
-            CASE
-                WHEN rn = (CAST((n - 1) * 0.01 AS INTEGER) + 1) THEN rtt
-            END
-        ) AS p01,
-        MAX(
-            CASE
-                WHEN rn = (CAST((n - 1) * 0.99 AS INTEGER) + 1) THEN rtt
-            END
-        ) AS p99
-    FROM ordered o
-    GROUP BY o.idx
-),
-rounded AS (
-    SELECT idx,
-        rtt,
-        CAST(ROUND(rtt) AS INTEGER) AS rtt_ms
-    FROM samples
-),
-mode_calc AS (
-    SELECT idx,
-        rtt_ms,
-        COUNT(*) AS cnt,
-        ROW_NUMBER() OVER (
-            PARTITION BY idx
-            ORDER BY COUNT(*) DESC,
-                rtt_ms DESC
-        ) AS rn
-    FROM rounded
-    GROUP BY idx,
-        rtt_ms
-),
-mode AS (
-    SELECT idx,
-        rtt_ms AS mode_ms,
-        cnt AS mode_count
-    FROM mode_calc
-    WHERE rn = 1
-),
-value_counts AS (
-    SELECT r.idx,
-        SUM(
-            CASE
-                WHEN r.rtt_ms = CAST(ROUND(b.avg_rtt) AS INTEGER) THEN 1
-                ELSE 0
-            END
-        ) AS mean_count,
-        SUM(
-            CASE
-                WHEN r.rtt_ms = CAST(ROUND(p.p50) AS INTEGER) THEN 1
-                ELSE 0
-            END
-        ) AS median_count,
-        MAX(m.mode_count) AS mode_count
-    FROM rounded r
-        JOIN basic b USING (idx)
-        JOIN percentiles p USING (idx)
-        LEFT JOIN mode m USING (idx)
-    GROUP BY r.idx
-),
--- ----------------------------
--- Diffs, jitter, loss, outages, clusters (per idx)
--- ----------------------------
-diff_inputs AS (
+)
+SELECT (d + 1) AS idx,
+    strftime(
+        '%Y-%m-%d %H:%M:%S+00:00',
+        'now',
+        'localtime',
+        'start of day',
+        printf('-%d days', d),
+        'utc'
+    ) AS start_ts,
+    strftime(
+        '%Y-%m-%d %H:%M:%S+00:00',
+        'now',
+        'localtime',
+        'start of day',
+        printf('-%d days', d),
+        '+1 day',
+        'utc'
+    ) AS end_ts
+FROM days
+UNION ALL
+SELECT (w + 8) AS idx,
+    strftime(
+        '%Y-%m-%d %H:%M:%S+00:00',
+        'now',
+        'localtime',
+        'start of day',
+        printf('-%d days', w * 7 + 6),
+        'utc'
+    ) AS start_ts,
+    strftime(
+        '%Y-%m-%d %H:%M:%S+00:00',
+        'now',
+        'localtime',
+        'start of day',
+        printf('%+d days', 1 - w * 7),
+        'utc'
+    ) AS end_ts
+FROM weeks
+UNION ALL
+SELECT 12 AS idx,
+    strftime(
+        '%Y-%m-%d %H:%M:%S+00:00',
+        'now',
+        'localtime',
+        'start of day',
+        '-29 days',
+        'utc'
+    ) AS start_ts,
+    strftime(
+        '%Y-%m-%d %H:%M:%S+00:00',
+        'now',
+        'localtime',
+        'start of day',
+        '+1 day',
+        'utc'
+    ) AS end_ts;
+CREATE TEMP TABLE report_pinger_stage (
+    idx INTEGER NOT NULL,
+    ts TEXT NOT NULL,
+    tsec INTEGER NOT NULL,
+    rtt REAL NOT NULL,
+    rtt_ms INTEGER NOT NULL
+);
+INSERT INTO report_pinger_stage(idx, ts, tsec, rtt, rtt_ms)
+SELECT p.idx,
+    s.ts,
+    unixepoch(s.ts) AS tsec,
+    CAST(s.latency_ms AS REAL) AS rtt,
+    CAST(ROUND(s.latency_ms) AS INTEGER) AS rtt_ms
+FROM pings s
+    JOIN report_pinger_periods p ON s.ts >= p.start_ts
+    AND s.ts < p.end_ts
+WHERE s.ts >= (
+        SELECT MIN(start_ts)
+        FROM report_pinger_periods
+    )
+    AND s.ts < (
+        SELECT MAX(end_ts)
+        FROM report_pinger_periods
+    )
+ORDER BY p.idx,
+    s.ts;
+CREATE INDEX report_pinger_stage_idx_ts ON report_pinger_stage(idx, ts);
+CREATE TEMP TABLE report_pinger_diffs AS WITH diff_inputs AS (
     SELECT idx,
         ts,
         tsec,
@@ -231,46 +147,215 @@ diff_inputs AS (
             PARTITION BY idx
             ORDER BY ts
         ) AS prev_tsec
-    FROM samples
-),
-diffs AS (
+    FROM report_pinger_stage
+)
+SELECT idx,
+    ts,
+    tsec,
+    ABS(rtt - prev_rtt) AS diff,
+    (tsec - prev_tsec) AS gap
+FROM diff_inputs;
+CREATE INDEX report_pinger_diffs_idx ON report_pinger_diffs(idx, ts);
+CREATE TEMP TABLE report_pinger_outages AS
+SELECT idx,
+    ts,
+    gap,
+    (tsec - gap) AS start_sec,
+    tsec AS end_sec,
+    (gap - 1) AS lost_sec
+FROM report_pinger_diffs
+WHERE gap IS NOT NULL
+    AND gap > (
+        SELECT loss_gap_s
+        FROM report_pinger_params
+    );
+CREATE INDEX report_pinger_outages_idx ON report_pinger_outages(idx, start_sec);
+CREATE TEMP TABLE report_pinger_agg AS WITH clusters AS (
     SELECT idx,
-        ts,
-        tsec,
-        ABS(rtt - prev_rtt) AS diff,
-        (tsec - prev_tsec) AS gap
-    FROM diff_inputs
+        start_sec,
+        end_sec,
+        lost_sec,
+        CASE
+            WHEN start_sec > (
+                LAG(end_sec) OVER (
+                    PARTITION BY idx
+                    ORDER BY start_sec
+                )
+            ) + (
+                SELECT heal_s
+                FROM report_pinger_params
+            ) THEN 1
+            ELSE 0
+        END AS new_cluster_flag
+    FROM report_pinger_outages
+),
+clustered AS (
+    SELECT idx,
+        start_sec,
+        end_sec,
+        lost_sec,
+        SUM(new_cluster_flag) OVER (
+            PARTITION BY idx
+            ORDER BY start_sec ROWS UNBOUNDED PRECEDING
+        ) AS cluster_id
+    FROM clusters
+)
+SELECT idx,
+    cluster_id,
+    MIN(start_sec) AS cluster_start,
+    MAX(end_sec) AS cluster_end,
+    SUM(lost_sec) AS cluster_lost_sec,
+    (MAX(end_sec) - MIN(start_sec)) AS cluster_span_sec
+FROM clustered
+GROUP BY idx,
+    cluster_id;
+CREATE INDEX report_pinger_agg_idx ON report_pinger_agg(idx, cluster_id);
+CREATE TEMP TABLE report_pinger_cluster_lost_ranked AS WITH agg_counts AS (
+    SELECT idx,
+        COUNT(*) AS n
+    FROM report_pinger_agg
+    GROUP BY idx
+)
+SELECT a.idx,
+    a.cluster_lost_sec,
+    ROW_NUMBER() OVER (
+        PARTITION BY a.idx
+        ORDER BY a.cluster_lost_sec
+    ) AS rn,
+    c.n
+FROM report_pinger_agg a
+    JOIN agg_counts c USING (idx);
+CREATE INDEX report_pinger_cluster_lost_ranked_idx ON report_pinger_cluster_lost_ranked(idx, rn);
+CREATE TEMP TABLE report_pinger_cluster_span_ranked AS WITH agg_counts AS (
+    SELECT idx,
+        COUNT(*) AS n
+    FROM report_pinger_agg
+    GROUP BY idx
+)
+SELECT a.idx,
+    a.cluster_span_sec,
+    ROW_NUMBER() OVER (
+        PARTITION BY a.idx
+        ORDER BY a.cluster_span_sec
+    ) AS rn,
+    c.n
+FROM report_pinger_agg a
+    JOIN agg_counts c USING (idx);
+CREATE INDEX report_pinger_cluster_span_ranked_idx ON report_pinger_cluster_span_ranked(idx, rn);
+CREATE INDEX report_pinger_stage_idx_rtt ON report_pinger_stage(idx, rtt, ts);
+CREATE INDEX report_pinger_stage_idx_rtt_ms ON report_pinger_stage(idx, rtt_ms);
+CREATE TEMP TABLE report_pinger_basic AS
+SELECT idx,
+    MIN(rtt) AS min_rtt,
+    MAX(rtt) AS max_rtt,
+    AVG(rtt) AS avg_rtt
+FROM report_pinger_stage
+GROUP BY idx;
+CREATE TEMP TABLE report_pinger_counts AS
+SELECT idx,
+    COUNT(*) AS n
+FROM report_pinger_stage
+GROUP BY idx;
+CREATE UNIQUE INDEX report_pinger_counts_idx ON report_pinger_counts(idx);
+CREATE TEMP TABLE report_pinger_ordered AS
+SELECT idx,
+    ROW_NUMBER() OVER (
+        PARTITION BY idx
+        ORDER BY rtt
+    ) AS rn,
+    rtt
+FROM report_pinger_stage;
+CREATE INDEX report_pinger_ordered_idx ON report_pinger_ordered(idx, rn);
+CREATE TEMP TABLE report_pinger_percentiles AS
+SELECT c.idx,
+    o50.rtt AS p50,
+    o01.rtt AS p01,
+    o99.rtt AS p99
+FROM report_pinger_counts c
+    LEFT JOIN report_pinger_ordered o50 ON o50.idx = c.idx
+    AND o50.rn = ((c.n + 1) / 2)
+    LEFT JOIN report_pinger_ordered o01 ON o01.idx = c.idx
+    AND o01.rn = (CAST((c.n - 1) * 0.01 AS INTEGER) + 1)
+    LEFT JOIN report_pinger_ordered o99 ON o99.idx = c.idx
+    AND o99.rn = (CAST((c.n - 1) * 0.99 AS INTEGER) + 1);
+CREATE TEMP TABLE report_pinger_mode_calc AS WITH grouped AS (
+    SELECT idx,
+        rtt_ms,
+        COUNT(*) AS cnt
+    FROM report_pinger_stage
+    GROUP BY idx,
+        rtt_ms
+)
+SELECT idx,
+    rtt_ms,
+    cnt,
+    ROW_NUMBER() OVER (
+        PARTITION BY idx
+        ORDER BY cnt DESC,
+            rtt_ms DESC
+    ) AS rn
+FROM grouped;
+CREATE INDEX report_pinger_mode_calc_idx ON report_pinger_mode_calc(idx, rn);
+CREATE TEMP TABLE report_pinger_mode AS
+SELECT idx,
+    rtt_ms AS mode_ms,
+    cnt AS mode_count
+FROM report_pinger_mode_calc
+WHERE rn = 1;
+CREATE TEMP TABLE report_pinger_value_counts AS
+SELECT b.idx,
+    (
+        SELECT COUNT(*)
+        FROM report_pinger_stage s
+        WHERE s.idx = b.idx
+            AND s.rtt_ms = CAST(ROUND(b.avg_rtt) AS INTEGER)
+    ) AS mean_count,
+    CASE
+        WHEN p.p50 IS NULL THEN 0
+        ELSE (
+            SELECT COUNT(*)
+            FROM report_pinger_stage s
+            WHERE s.idx = b.idx
+                AND s.rtt_ms = CAST(ROUND(p.p50) AS INTEGER)
+        )
+    END AS median_count,
+    COALESCE(m.mode_count, 0) AS mode_count
+FROM report_pinger_basic b
+    LEFT JOIN report_pinger_percentiles p USING (idx)
+    LEFT JOIN report_pinger_mode m USING (idx);
+WITH observed AS (
+    SELECT idx,
+        COUNT(*) AS sample_count
+    FROM report_pinger_stage
+    GROUP BY idx
 ),
 jitter AS (
     SELECT idx,
         AVG(diff) AS jitter_ms
-    FROM diffs,
-        params
+    FROM report_pinger_diffs
     WHERE gap IS NOT NULL
-        AND gap <= loss_gap_s
+        AND gap <= (
+            SELECT loss_gap_s
+            FROM report_pinger_params
+        )
     GROUP BY idx
 ),
 loss_events AS (
     SELECT idx,
         SUM(
             CASE
-                WHEN gap > loss_gap_s THEN 1
+                WHEN gap > (
+                    SELECT loss_gap_s
+                    FROM report_pinger_params
+                ) THEN 1
                 ELSE 0
             END
         ) AS loss_events
-    FROM diffs,
-        params
+    FROM report_pinger_diffs
     WHERE gap IS NOT NULL
     GROUP BY idx
 ),
-observed AS (
-    SELECT idx,
-        COUNT(*) AS sample_count
-    FROM samples
-    GROUP BY idx
-),
 loss_percent AS (
-    -- Event-based percent: events / (observed + events)
     SELECT o.idx,
         CASE
             WHEN (o.sample_count + COALESCE(e.loss_events, 0)) = 0 THEN 0.0
@@ -279,88 +364,23 @@ loss_percent AS (
     FROM observed o
         LEFT JOIN loss_events e USING (idx)
 ),
-outages AS (
-    SELECT idx,
-        ts,
-        gap,
-        (tsec - gap) AS start_sec,
-        tsec AS end_sec,
-        (gap - 1) AS lost_sec
-    FROM diffs,
-        params
-    WHERE gap IS NOT NULL
-        AND gap > loss_gap_s
-),
-clusters AS (
-    SELECT *,
-        CASE
-            WHEN start_sec > (
-                LAG(end_sec) OVER (
-                    PARTITION BY idx
-                    ORDER BY start_sec
-                )
-            ) + heal_s THEN 1
-            ELSE 0
-        END AS new_cluster_flag
-    FROM outages,
-        params
-),
-clustered AS (
-    SELECT *,
-        SUM(new_cluster_flag) OVER (
-            PARTITION BY idx
-            ORDER BY start_sec ROWS UNBOUNDED PRECEDING
-        ) AS cluster_id
-    FROM clusters
-),
-agg AS (
-    SELECT idx,
-        cluster_id,
-        MIN(start_sec) AS cluster_start,
-        MAX(end_sec) AS cluster_end,
-        SUM(lost_sec) AS cluster_lost_sec,
-        (MAX(end_sec) - MIN(start_sec)) AS cluster_span_sec
-    FROM clustered
-    GROUP BY idx,
-        cluster_id
-),
-cluster_counts AS (
+cluster_events AS (
     SELECT idx,
         COUNT(*) AS cluster_events
-    FROM agg
+    FROM report_pinger_agg
     GROUP BY idx
-),
-cluster_lost_ranked AS (
-    SELECT idx,
-        cluster_lost_sec,
-        ROW_NUMBER() OVER (
-            PARTITION BY idx
-            ORDER BY cluster_lost_sec
-        ) AS rn,
-        COUNT(*) OVER (PARTITION BY idx) AS n
-    FROM agg
-),
-cluster_span_ranked AS (
-    SELECT idx,
-        cluster_span_sec,
-        ROW_NUMBER() OVER (
-            PARTITION BY idx
-            ORDER BY cluster_span_sec
-        ) AS rn,
-        COUNT(*) OVER (PARTITION BY idx) AS n
-    FROM agg
 ),
 cluster_lost_medians AS (
     SELECT idx,
         MAX(cluster_lost_sec) AS med_cluster_lost_sec
-    FROM cluster_lost_ranked
+    FROM report_pinger_cluster_lost_ranked
     WHERE rn = ((n + 1) / 2)
     GROUP BY idx
 ),
 cluster_span_medians AS (
     SELECT idx,
         MAX(cluster_span_sec) AS med_cluster_span_sec
-    FROM cluster_span_ranked
+    FROM report_pinger_cluster_span_ranked
     WHERE rn = ((n + 1) / 2)
     GROUP BY idx
 ),
@@ -370,49 +390,46 @@ cluster_medians AS (
         s.med_cluster_span_sec
     FROM (
             SELECT DISTINCT idx
-            FROM agg
+            FROM report_pinger_agg
         ) i
         LEFT JOIN cluster_lost_medians l USING (idx)
         LEFT JOIN cluster_span_medians s USING (idx)
 ),
--- ----------------------------
--- Key/Value assembly for pivot
--- ----------------------------
 kv AS (
     SELECT 'Minimum (ms)' AS metric,
         idx,
         min_rtt AS val
-    FROM basic
+    FROM report_pinger_basic
     UNION ALL
     SELECT 'Maximum (ms)',
         idx,
         max_rtt
-    FROM basic
+    FROM report_pinger_basic
     UNION ALL
     SELECT 'Mean (ms)',
         idx,
         avg_rtt
-    FROM basic
+    FROM report_pinger_basic
     UNION ALL
     SELECT 'Median (ms)',
         idx,
         p50
-    FROM percentiles
+    FROM report_pinger_percentiles
     UNION ALL
     SELECT 'Mode (ms)',
         idx,
         mode_ms
-    FROM mode
+    FROM report_pinger_mode
     UNION ALL
     SELECT '1st percentile (ms)',
         idx,
         p01
-    FROM percentiles
+    FROM report_pinger_percentiles
     UNION ALL
     SELECT '99th percentile (ms)',
         idx,
         p99
-    FROM percentiles
+    FROM report_pinger_percentiles
     UNION ALL
     SELECT 'Jitter (ms)',
         idx,
@@ -422,17 +439,17 @@ kv AS (
     SELECT 'Mean count',
         idx,
         mean_count
-    FROM value_counts
+    FROM report_pinger_value_counts
     UNION ALL
     SELECT 'Median count',
         idx,
         median_count
-    FROM value_counts
+    FROM report_pinger_value_counts
     UNION ALL
     SELECT 'Mode count',
         idx,
         mode_count
-    FROM value_counts
+    FROM report_pinger_value_counts
     UNION ALL
     SELECT 'Sample count',
         idx,
@@ -449,11 +466,13 @@ kv AS (
         loss_percent
     FROM loss_percent
     UNION ALL
-    SELECT clusters_label,
+    SELECT (
+            SELECT clusters_label
+            FROM report_pinger_params
+        ),
         idx,
         cluster_events
-    FROM cluster_counts,
-        label
+    FROM cluster_events
     UNION ALL
     SELECT 'Median cluster loss (s)',
         idx,
@@ -464,10 +483,7 @@ kv AS (
         idx,
         med_cluster_span_sec
     FROM cluster_medians
-) -- ----------------------------
--- Final pivot: D1..D7 (days), W1..W4 (weeks), M1 (month)
--- Integers rendered without decimals; others with 3 decimals
--- ----------------------------
+)
 SELECT metric,
     CASE
         WHEN metric IN (
@@ -476,7 +492,10 @@ SELECT metric,
             'Mode count',
             'Sample count',
             'Loss events',
-            clusters_label,
+            (
+                SELECT clusters_label
+                FROM report_pinger_params
+            ),
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
@@ -508,7 +527,10 @@ SELECT metric,
             'Mode count',
             'Sample count',
             'Loss events',
-            clusters_label,
+            (
+                SELECT clusters_label
+                FROM report_pinger_params
+            ),
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
@@ -540,7 +562,10 @@ SELECT metric,
             'Mode count',
             'Sample count',
             'Loss events',
-            clusters_label,
+            (
+                SELECT clusters_label
+                FROM report_pinger_params
+            ),
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
@@ -572,7 +597,10 @@ SELECT metric,
             'Mode count',
             'Sample count',
             'Loss events',
-            clusters_label,
+            (
+                SELECT clusters_label
+                FROM report_pinger_params
+            ),
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
@@ -604,7 +632,10 @@ SELECT metric,
             'Mode count',
             'Sample count',
             'Loss events',
-            clusters_label,
+            (
+                SELECT clusters_label
+                FROM report_pinger_params
+            ),
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
@@ -636,7 +667,10 @@ SELECT metric,
             'Mode count',
             'Sample count',
             'Loss events',
-            clusters_label,
+            (
+                SELECT clusters_label
+                FROM report_pinger_params
+            ),
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
@@ -668,7 +702,10 @@ SELECT metric,
             'Mode count',
             'Sample count',
             'Loss events',
-            clusters_label,
+            (
+                SELECT clusters_label
+                FROM report_pinger_params
+            ),
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
@@ -700,7 +737,10 @@ SELECT metric,
             'Mode count',
             'Sample count',
             'Loss events',
-            clusters_label,
+            (
+                SELECT clusters_label
+                FROM report_pinger_params
+            ),
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
@@ -732,7 +772,10 @@ SELECT metric,
             'Mode count',
             'Sample count',
             'Loss events',
-            clusters_label,
+            (
+                SELECT clusters_label
+                FROM report_pinger_params
+            ),
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
@@ -764,7 +807,10 @@ SELECT metric,
             'Mode count',
             'Sample count',
             'Loss events',
-            clusters_label,
+            (
+                SELECT clusters_label
+                FROM report_pinger_params
+            ),
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
@@ -796,7 +842,10 @@ SELECT metric,
             'Mode count',
             'Sample count',
             'Loss events',
-            clusters_label,
+            (
+                SELECT clusters_label
+                FROM report_pinger_params
+            ),
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
@@ -828,7 +877,10 @@ SELECT metric,
             'Mode count',
             'Sample count',
             'Loss events',
-            clusters_label,
+            (
+                SELECT clusters_label
+                FROM report_pinger_params
+            ),
             'Median cluster loss (s)',
             'Median cluster span (s)'
         ) THEN CAST(
@@ -853,10 +905,8 @@ SELECT metric,
             3
         )
     END AS M1
-FROM kv,
-    label
-GROUP BY metric,
-    clusters_label
+FROM kv
+GROUP BY metric
 ORDER BY CASE
         metric
         WHEN 'Minimum (ms)' THEN 1
@@ -873,8 +923,11 @@ ORDER BY CASE
         WHEN 'Sample count' THEN 12
         WHEN 'Loss events' THEN 13
         WHEN 'Loss percent (%)' THEN 14
-        WHEN clusters_label THEN 15
+        WHEN (
+            SELECT clusters_label
+            FROM report_pinger_params
+        ) THEN 15
         WHEN 'Median cluster loss (s)' THEN 16
         WHEN 'Median cluster span (s)' THEN 17
-        ELSE 99
+        ELSE 999
     END;

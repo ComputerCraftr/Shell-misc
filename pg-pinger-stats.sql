@@ -129,7 +129,7 @@ basic AS (
     FROM samples
     GROUP BY idx
 ),
-ordered AS (
+ordered AS MATERIALIZED (
     SELECT idx,
         rtt,
         ROW_NUMBER() OVER (
@@ -160,7 +160,7 @@ percentiles AS (
     FROM ordered o
     GROUP BY o.idx
 ),
-rounded AS (
+rounded AS MATERIALIZED (
     SELECT idx,
         rtt,
         round(rtt)::integer AS rtt_ms
@@ -187,30 +187,31 @@ mode AS (
     WHERE rn = 1
 ),
 value_counts AS (
-    SELECT r.idx,
-        SUM(
-            CASE
-                WHEN r.rtt_ms = round(b.avg_rtt)::integer THEN 1
-                ELSE 0
-            END
+    SELECT b.idx,
+        (
+            SELECT COUNT(*)
+            FROM rounded r
+            WHERE r.idx = b.idx
+                AND r.rtt_ms = round(b.avg_rtt)::integer
         ) AS mean_count,
-        SUM(
-            CASE
-                WHEN r.rtt_ms = round(p.p50)::integer THEN 1
-                ELSE 0
-            END
-        ) AS median_count,
-        MAX(m.mode_count) AS mode_count
-    FROM rounded r
-        JOIN basic b USING (idx)
-        JOIN percentiles p USING (idx)
+        CASE
+            WHEN p.p50 IS NULL THEN 0
+            ELSE (
+                SELECT COUNT(*)
+                FROM rounded r
+                WHERE r.idx = b.idx
+                    AND r.rtt_ms = round(p.p50)::integer
+            )
+        END AS median_count,
+        COALESCE(m.mode_count, 0) AS mode_count
+    FROM basic b
+        LEFT JOIN percentiles p USING (idx)
         LEFT JOIN mode m USING (idx)
-    GROUP BY r.idx
 ),
 -- ----------------------------
 -- Diffs, jitter, loss, outages, clusters (per idx)
 -- ----------------------------
-diff_inputs AS (
+diff_inputs AS MATERIALIZED (
     SELECT idx,
         ts,
         tsec,
@@ -225,7 +226,7 @@ diff_inputs AS (
         ) AS prev_tsec
     FROM samples
 ),
-diffs AS (
+diffs AS MATERIALIZED (
     SELECT idx,
         ts,
         tsec,
@@ -271,7 +272,7 @@ loss_percent AS (
     FROM observed o
         LEFT JOIN loss_events e USING (idx)
 ),
-outages AS (
+outages AS MATERIALIZED (
     SELECT idx,
         ts,
         gap,
@@ -305,7 +306,7 @@ clustered AS (
         ) AS cluster_id
     FROM clusters
 ),
-agg AS (
+agg AS MATERIALIZED (
     SELECT idx,
         cluster_id,
         MIN(start_sec) AS cluster_start,
@@ -322,7 +323,7 @@ cluster_counts AS (
     FROM agg
     GROUP BY idx
 ),
-cluster_lost_ranked AS (
+cluster_lost_ranked AS MATERIALIZED (
     SELECT idx,
         cluster_lost_sec,
         ROW_NUMBER() OVER (
@@ -332,7 +333,7 @@ cluster_lost_ranked AS (
         COUNT(*) OVER (PARTITION BY idx) AS n
     FROM agg
 ),
-cluster_span_ranked AS (
+cluster_span_ranked AS MATERIALIZED (
     SELECT idx,
         cluster_span_sec,
         ROW_NUMBER() OVER (

@@ -182,10 +182,18 @@ INIT_SCHEMA_TMPL=$(
 -- SQLite or PostgreSQL schema initialization
 CREATE TABLE IF NOT EXISTS %TABLE% (
     slot      INTEGER PRIMARY KEY,
-    ts        %TSTYPE% NOT NULL DEFAULT CURRENT_TIMESTAMP UNIQUE,
+    ts        %TS_TYPE% NOT NULL DEFAULT CURRENT_TIMESTAMP UNIQUE,
     power_w   REAL    NOT NULL,
     loadpct   REAL    NOT NULL
 );
+EOS
+)
+
+ENSURE_INDEXES_TMPL=$(
+    cat <<'EOS'
+-- Belt-and-suspenders report index hardening.
+-- slot PRIMARY KEY is already backed by the engine; ensure a plain ts index exists.
+CREATE UNIQUE INDEX IF NOT EXISTS %TS_INDEX% ON %TABLE%(ts);
 EOS
 )
 
@@ -206,11 +214,15 @@ LAST_SLOT_TMPL="SELECT slot FROM %TABLE% ORDER BY ts DESC LIMIT 1;"
 # Determine client command and schema substitutions
 case "$DB_TYPE" in
 sqlite)
-    SED_RENDER='s/%TABLE%/watts/g; s/%TSTYPE%/DATETIME/g'
+    TABLE_NAME="watts"
+    TS_TYPE="DATETIME"
+    TS_INDEX_NAME="watts_ts_idx"
     CLIENT_CMD="sqlite3 '$DB_FILE'"
     ;;
 postgres)
-    SED_RENDER='s/%TABLE%/power_logger.watts/g; s/%TSTYPE%/TIMESTAMPTZ/g'
+    TABLE_NAME="power_logger.watts"
+    TS_TYPE="TIMESTAMPTZ"
+    TS_INDEX_NAME="watts_ts_idx"
     CLIENT_CMD="psql -qAt -h '$PGHOST' -p '$PGPORT' -U '$PGUSER' -d '$PGDATABASE'"
     ;;
 *)
@@ -219,15 +231,33 @@ postgres)
     ;;
 esac
 
+render_table_sql() {
+    printf '%s\n' "$1" | sed "s/%TABLE%/$TABLE_NAME/g"
+}
+
+render_schema_sql() {
+    printf '%s\n' "$INIT_SCHEMA_TMPL" |
+        sed "s/%TABLE%/$TABLE_NAME/g; s/%TS_TYPE%/$TS_TYPE/g"
+}
+
+render_index_sql() {
+    printf '%s\n' "$ENSURE_INDEXES_TMPL" |
+        sed "s/%TABLE%/$TABLE_NAME/g; s/%TS_INDEX%/$TS_INDEX_NAME/g"
+}
+
 # Initialize schema
-INIT_SCHEMA_SQL=$(echo "$INIT_SCHEMA_TMPL" | sed "$SED_RENDER")
+INIT_SCHEMA_SQL=$(render_schema_sql)
 run_sql_command "$INIT_SCHEMA_SQL" \
     "init-schema" \
+    log_err >/dev/null
+ENSURE_INDEXES_SQL=$(render_index_sql)
+run_sql_command "$ENSURE_INDEXES_SQL" \
+    "ensure-indexes" \
     log_err >/dev/null
 log "Initialized power logger source='$POWER_SOURCE' db_type='$DB_TYPE' interval='$INTERVAL_SEC' ring_buffer_size='$RING_BUFFER_SIZE'"
 
 # Determine starting slot
-LAST_SLOT_SQL=$(echo "$LAST_SLOT_TMPL" | sed "$SED_RENDER")
+LAST_SLOT_SQL=$(render_table_sql "$LAST_SLOT_TMPL")
 LAST_SLOT=$(run_sql_command "$LAST_SLOT_SQL" "select-last-slot" log_err)
 
 case "$LAST_SLOT" in
@@ -286,7 +316,7 @@ while :; do
             continue
             ;;
         esac
-        WATTS=$(echo "$LOADPCT * $NOMPOWER / 100" | bc -l)
+        WATTS=$(printf '%s\n' "$LOADPCT * $NOMPOWER / 100" | bc -l)
         ;;
     ipmi)
         LOADPCT="0"
@@ -301,8 +331,8 @@ while :; do
         ;;
     esac
 
-    UPSERT_SQL=$(echo "$UPSERT_TMPL" |
-        sed "$SED_RENDER; s/%CURRENT_SLOT%/$CURRENT_SLOT/; s/%CURRENT_TS%/$CURRENT_TS/; s/%WATTS%/$WATTS/; s/%LOADPCT%/$LOADPCT/")
+    UPSERT_SQL=$(printf '%s\n' "$UPSERT_TMPL" |
+        sed "s/%TABLE%/$TABLE_NAME/g; s/%CURRENT_SLOT%/$CURRENT_SLOT/; s/%CURRENT_TS%/$CURRENT_TS/; s/%WATTS%/$WATTS/; s/%LOADPCT%/$LOADPCT/")
     if ! run_sql_command "$UPSERT_SQL" "write-sample" log_err >/dev/null; then
         continue
     fi

@@ -112,7 +112,7 @@ samples AS MATERIALIZED (
         JOIN base_samples s ON s.ts >= p.start_ts
         AND s.ts < p.end_ts
 ),
-interval_inputs AS (
+interval_inputs AS MATERIALIZED (
     SELECT idx,
         watts,
         tsec,
@@ -122,7 +122,7 @@ interval_inputs AS (
         ) AS next_tsec
     FROM samples
 ),
-intervals AS (
+intervals AS MATERIALIZED (
     SELECT idx,
         watts,
         tsec,
@@ -182,7 +182,7 @@ basic AS (
     FROM samples
     GROUP BY idx
 ),
-ordered AS (
+ordered AS MATERIALIZED (
     SELECT idx,
         watts,
         ROW_NUMBER() OVER (
@@ -213,7 +213,7 @@ percentiles AS (
     FROM ordered o
     GROUP BY o.idx
 ),
-rounded AS (
+rounded AS MATERIALIZED (
     SELECT idx,
         watts,
         round(watts)::integer AS watts_whole
@@ -240,25 +240,26 @@ mode AS (
     WHERE rn = 1
 ),
 value_counts AS (
-    SELECT r.idx,
-        SUM(
-            CASE
-                WHEN r.watts_whole = round(e.mean_watts)::integer THEN 1
-                ELSE 0
-            END
+    SELECT e.idx,
+        (
+            SELECT COUNT(*)
+            FROM rounded r
+            WHERE r.idx = e.idx
+                AND r.watts_whole = round(e.mean_watts)::integer
         ) AS mean_count,
-        SUM(
-            CASE
-                WHEN r.watts_whole = round(p.p50)::integer THEN 1
-                ELSE 0
-            END
-        ) AS median_count,
-        MAX(m.mode_count) AS mode_count
-    FROM rounded r
-        JOIN energy_stats e USING (idx)
-        JOIN percentiles p USING (idx)
+        CASE
+            WHEN p.p50 IS NULL THEN 0
+            ELSE (
+                SELECT COUNT(*)
+                FROM rounded r
+                WHERE r.idx = e.idx
+                    AND r.watts_whole = round(p.p50)::integer
+            )
+        END AS median_count,
+        COALESCE(m.mode_count, 0) AS mode_count
+    FROM energy_stats e
+        LEFT JOIN percentiles p USING (idx)
         LEFT JOIN mode m USING (idx)
-    GROUP BY r.idx
 ),
 observed AS (
     SELECT idx,
