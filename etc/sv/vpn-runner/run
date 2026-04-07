@@ -94,7 +94,7 @@ while [ -n "$CANDIDATE_LINES" ]; do
 
     # Restart the DHCP client service on the interface.
     log "Restarting dhclient on '$EXT_IF_NEW'"
-    if ! service "$DHCLIENT_SERVICE" restart "$EXT_IF_NEW"; then
+    if ! timeout -f "$GATEWAY_TIMEOUT" service "$DHCLIENT_SERVICE" restart "$EXT_IF_NEW"; then
         log_err "DHCP restart failed on $EXT_IF_NEW; trying another interface."
         remove_current
         continue
