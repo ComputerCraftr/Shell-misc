@@ -6,27 +6,48 @@
 # Service account: power-logger
 #
 # Prerequisites (run once as root):
-#   pw groupadd -n power-logger || true
-#   pw useradd -n power-logger -g power-logger -c "power logger service" -s /usr/sbin/nologin -d /nonexistent -w no || true
+# Common:
 #   install -d -o power-logger -g power-logger /var/db/power-logger
-#   install -d -o root -g power-logger -m 755 /etc/sv/power-logger/env
-#   install -o root -g power-logger -m 640 /dev/null /etc/sv/power-logger/env/.env.power-logger
-#   cat > /etc/sv/power-logger/env/.env.power-logger <<'EOF'
-#   SERVICE_USER=power-logger
-#   RING_BUFFER_DAYS=30
-#   INTERVAL_SEC=1
-#   DB_TYPE=sqlite
-#   EOF
+#   install -d -o root -g wheel -m 755 /usr/local/libexec
+#   install -o root -g wheel -m 755 usr/local/libexec/power-logger-ipmi-readings /usr/local/libexec/power-logger-ipmi-readings
+#   install -o root -g power-logger -m 640 etc/power-logger.env <OS_NATIVE_POWER_LOGGER_ENV>
+#   install -o root -g wheel -m 600 etc/power-logger-ipmi.conf <OS_NATIVE_POWER_LOGGER_IPMI_CONF>
+#   # If using PostgreSQL, also set PGHOST, PGPORT, PGDATABASE, PGUSER in the env file.
+#   # The IPMI mapping file is privileged helper config, not service env.
 #
-# If using PostgreSQL, also set PGHOST, PGPORT, PGDATABASE, PGUSER in the .env file.
+# FreeBSD:
+#   pw groupadd -g "$gid" -n "$name"
+#   pw useradd -u "$uid" -g "$gid" -d "$home" -w no -s /usr/sbin/nologin -n "$name"
+#   # Example:
+#   #   name=power-logger gid=974 uid=974 home=/nonexistent
+#   #   pw groupadd -g "$gid" -n "$name" || true
+#   #   pw useradd -u "$uid" -g "$gid" -d "$home" -w no -s /usr/sbin/nologin -n "$name" || true
+#   install -d -o root -g wheel -m 755 /usr/local/etc
+#   install -o root -g power-logger -m 640 etc/power-logger.env /usr/local/etc/power-logger.env
+#   install -o root -g wheel -m 600 etc/power-logger-ipmi.conf /usr/local/etc/power-logger-ipmi.conf
+#   install -d -o root -g wheel -m 755 /usr/local/etc/sudoers.d
+#   install -o root -g wheel -m 440 etc/sudoers.d/power-logger /usr/local/etc/sudoers.d/power-logger
+#
+# Linux:
+#   groupadd -g "$gid" -r "$name"
+#   useradd -u "$uid" -g "$gid" -d "$home" -M -N -r -s /usr/sbin/nologin "$name"
+#   # Example:
+#   #   name=power-logger gid=974 uid=974 home=/nonexistent
+#   #   groupadd -g "$gid" -r "$name" || true
+#   #   useradd -u "$uid" -g "$gid" -d "$home" -M -N -r -s /usr/sbin/nologin "$name" || true
+#   install -d -o root -g root -m 755 /etc
+#   install -o root -g power-logger -m 640 etc/power-logger.env /etc/power-logger.env
+#   install -o root -g root -m 600 etc/power-logger-ipmi.conf /etc/power-logger-ipmi.conf
+#   install -d -o root -g root -m 755 /etc/sudoers.d
+#   install -o root -g root -m 440 etc/sudoers.d/power-logger /etc/sudoers.d/power-logger
 # -------------------------------------------------------------
 # Enable service: ln -s /etc/sv/power-logger /var/service/
 set -eu
 
 SCRIPT_NAME=power-logger
 DATE_EPOCH_MODE=""
+OS_NAME=""
 
-# Helpers
 has_cmd() {
     command -v "$1" >/dev/null 2>&1
 }
@@ -98,13 +119,6 @@ apcaccess_value() {
     eval "$APCACCESS_BIN $APCACCESS_ARGS -u -p $1"
 }
 
-# Extract numeric watts from IPMI SDR output.
-ipmi_power_meter() {
-    eval "$IPMI_CMD" 2>/dev/null | awk -F'|' -v name="$IPMI_SENSOR" '
-        $1 ~ name { gsub(/[^0-9.]/, "", $2); if ($2 != "") { print $2; exit } }
-    '
-}
-
 format_sql_timestamp() {
     tick="$1"
     case "$DATE_EPOCH_MODE" in
@@ -121,6 +135,10 @@ format_sql_timestamp() {
     esac
 }
 
+detect_os_name() {
+    OS_NAME=$(uname -s 2>/dev/null || printf 'unknown')
+}
+
 detect_date_epoch_mode() {
     probe_tick=0
     if date -u -r "$probe_tick" '+%Y-%m-%d %H:%M:%S' >/dev/null 2>&1; then
@@ -135,10 +153,242 @@ detect_date_epoch_mode() {
     exit 1
 }
 
-# Environment
-ENV_DIR="$(dirname "$0")/env"
-# shellcheck disable=SC1091
-[ -f "$ENV_DIR/.env.power-logger" ] && . "$ENV_DIR/.env.power-logger"
+is_number() {
+    value="$1"
+    case "$value" in
+    '' | - | . | -. | *[!0-9.-]* | *.*.* | --* | *-*)
+        case "$value" in
+        -[0-9]* | -[0-9]*.[0-9]* | [0-9]* | [0-9]*.[0-9]*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+        esac
+        ;;
+    *)
+        return 0
+        ;;
+    esac
+}
+
+sql_numeric_or_null() {
+    value="$1"
+    if [ -z "$value" ]; then
+        printf 'NULL'
+        return 0
+    fi
+    if is_number "$value"; then
+        printf '%s' "$value"
+        return 0
+    fi
+    return 1
+}
+
+matches_cpu_sensor_name() {
+    sensor_name="$1"
+    printf '%s\n' "$sensor_name" | grep -Eiq '(package|cpu|core|tctl|tdie)'
+}
+
+avg_cpu_temp_c() {
+    case "$OS_NAME" in
+    FreeBSD)
+        sysctl dev.cpu 2>/dev/null | awk -F': ' '
+            /^dev\.cpu\.[0-9]+\.temperature:/ {
+                value = $2
+                gsub(/[^0-9.]/, "", value)
+                if (value != "") {
+                    sum += value
+                    n++
+                }
+            }
+            END {
+                if (n > 0) {
+                    printf "%.2f\n", sum / n
+                }
+            }
+        '
+        ;;
+    Linux)
+        if ls /sys/class/hwmon/hwmon*/temp*_input >/dev/null 2>&1; then
+            selected_sum=0
+            selected_n=0
+            fallback_sum=0
+            fallback_n=0
+            for input_file in /sys/class/hwmon/hwmon*/temp*_input; do
+                [ -f "$input_file" ] || continue
+                value=$(tr -d '\n' <"$input_file" 2>/dev/null || true)
+                case "$value" in
+                '' | *[!0-9]*)
+                    continue
+                    ;;
+                esac
+                [ "$value" -gt 0 ] || continue
+                fallback_sum=$((fallback_sum + value))
+                fallback_n=$((fallback_n + 1))
+
+                label_file=${input_file%_input}_label
+                if [ -f "$label_file" ]; then
+                    label=$(tr -d '\n' <"$label_file" 2>/dev/null || true)
+                    if matches_cpu_sensor_name "$label"; then
+                        selected_sum=$((selected_sum + value))
+                        selected_n=$((selected_n + 1))
+                    fi
+                fi
+            done
+            if [ "$selected_n" -gt 0 ]; then
+                awk "BEGIN { printf \"%.2f\\n\", $selected_sum / 1000 / $selected_n }"
+                return 0
+            fi
+            if [ "$fallback_n" -gt 0 ]; then
+                awk "BEGIN { printf \"%.2f\\n\", $fallback_sum / 1000 / $fallback_n }"
+                return 0
+            fi
+        fi
+
+        if ls /sys/class/thermal/thermal_zone*/temp >/dev/null 2>&1; then
+            selected_sum=0
+            selected_n=0
+            fallback_sum=0
+            fallback_n=0
+            for temp_file in /sys/class/thermal/thermal_zone*/temp; do
+                [ -f "$temp_file" ] || continue
+                value=$(tr -d '\n' <"$temp_file" 2>/dev/null || true)
+                case "$value" in
+                '' | *[!0-9]*)
+                    continue
+                    ;;
+                esac
+                [ "$value" -gt 0 ] || continue
+                fallback_sum=$((fallback_sum + value))
+                fallback_n=$((fallback_n + 1))
+
+                type_file=$(dirname "$temp_file")/type
+                if [ -f "$type_file" ]; then
+                    zone_type=$(tr -d '\n' <"$type_file" 2>/dev/null || true)
+                    if matches_cpu_sensor_name "$zone_type"; then
+                        selected_sum=$((selected_sum + value))
+                        selected_n=$((selected_n + 1))
+                    fi
+                fi
+            done
+            if [ "$selected_n" -gt 0 ]; then
+                awk "BEGIN { printf \"%.2f\\n\", $selected_sum / 1000 / $selected_n }"
+                return 0
+            fi
+            if [ "$fallback_n" -gt 0 ]; then
+                awk "BEGIN { printf \"%.2f\\n\", $fallback_sum / 1000 / $fallback_n }"
+                return 0
+            fi
+        fi
+        return 1
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
+
+avg_cpu_freq_mhz() {
+    case "$OS_NAME" in
+    FreeBSD)
+        sysctl dev.cpu 2>/dev/null | awk -F': ' '
+            /^dev\.cpu\.[0-9]+\.freq:/ {
+                value = $2
+                gsub(/[^0-9.]/, "", value)
+                if (value != "" && value > 0) {
+                    sum += value
+                    n++
+                }
+            }
+            END {
+                if (n > 0) {
+                    printf "%.2f\n", sum / n
+                }
+            }
+        '
+        ;;
+    Linux)
+        if ls /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq >/dev/null 2>&1; then
+            sum_khz=0
+            count=0
+            for freq_file in /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; do
+                [ -f "$freq_file" ] || continue
+                value=$(tr -d '\n' <"$freq_file" 2>/dev/null || true)
+                case "$value" in
+                '' | *[!0-9]*)
+                    continue
+                    ;;
+                esac
+                [ "$value" -gt 0 ] || continue
+                sum_khz=$((sum_khz + value))
+                count=$((count + 1))
+            done
+            if [ "$count" -gt 0 ]; then
+                awk "BEGIN { printf \"%.2f\\n\", $sum_khz / 1000 / $count }"
+                return 0
+            fi
+        fi
+        if ls /sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_cur_freq >/dev/null 2>&1; then
+            sum_khz=0
+            count=0
+            for freq_file in /sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_cur_freq; do
+                [ -f "$freq_file" ] || continue
+                value=$(tr -d '\n' <"$freq_file" 2>/dev/null || true)
+                case "$value" in
+                '' | *[!0-9]*)
+                    continue
+                    ;;
+                esac
+                [ "$value" -gt 0 ] || continue
+                sum_khz=$((sum_khz + value))
+                count=$((count + 1))
+            done
+            if [ "$count" -gt 0 ]; then
+                awk "BEGIN { printf \"%.2f\\n\", $sum_khz / 1000 / $count }"
+                return 0
+            fi
+        fi
+        return 1
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
+
+read_ipmi_helper_output() {
+    sudo -n /usr/local/libexec/power-logger-ipmi-readings
+}
+
+helper_value() {
+    key="$1"
+    awk -F'=' -v wanted="$key" '$1 == wanted { print $2; exit }'
+}
+
+resolve_service_config_path() {
+    case "$OS_NAME" in
+    FreeBSD)
+        printf '/usr/local/etc/power-logger.env'
+        ;;
+    Linux)
+        printf '/etc/power-logger.env'
+        ;;
+    *)
+        log_err "unsupported OS for config path resolution: '$OS_NAME'"
+        exit 1
+        ;;
+    esac
+}
+
+detect_os_name
+CONFIG_FILE=$(resolve_service_config_path)
+if [ ! -f "$CONFIG_FILE" ]; then
+    log_err "missing power-logger config file: $CONFIG_FILE"
+    exit 1
+fi
+# shellcheck disable=SC1090
+. "$CONFIG_FILE"
 
 # Defaults
 : "${SERVICE_USER:=power-logger}"
@@ -153,10 +403,7 @@ ENV_DIR="$(dirname "$0")/env"
 : "${POWER_SOURCE:=apc}"
 : "${APCACCESS_BIN:=apcaccess}"
 : "${APCACCESS_ARGS:=}"
-: "${IPMI_CMD:=ipmitool sdr}"
-: "${IPMI_SENSOR:=Power Meter}"
 
-# Startup validation and privilege drop
 if [ "$(id -un)" != "$SERVICE_USER" ]; then
     log "Dropping privileges to '$SERVICE_USER'"
     exec chpst -u "$SERVICE_USER" /bin/sh "$0" "$@"
@@ -176,42 +423,42 @@ esac
 RING_BUFFER_SIZE=$((RING_BUFFER_DAYS * 86400 / INTERVAL_SEC))
 [ "$RING_BUFFER_SIZE" -ge 1 ] || RING_BUFFER_SIZE=1
 
-# SQL setup
 INIT_SCHEMA_TMPL=$(
     cat <<'EOS'
--- SQLite or PostgreSQL schema initialization
 CREATE TABLE IF NOT EXISTS %TABLE% (
-    slot      INTEGER PRIMARY KEY,
-    ts        %TS_TYPE% NOT NULL DEFAULT CURRENT_TIMESTAMP UNIQUE,
-    power_w   REAL    NOT NULL,
-    loadpct   REAL    NOT NULL
+    slot             INTEGER PRIMARY KEY,
+    ts               %TS_TYPE% NOT NULL DEFAULT CURRENT_TIMESTAMP UNIQUE,
+    power_w          REAL NOT NULL,
+    loadpct          REAL,
+    avg_cpu_temp_c   REAL,
+    avg_fan_pct      REAL,
+    avg_cpu_freq_mhz REAL
 );
 EOS
 )
 
 ENSURE_INDEXES_TMPL=$(
     cat <<'EOS'
--- Belt-and-suspenders report index hardening.
--- slot PRIMARY KEY is already backed by the engine; ensure a plain ts index exists.
 CREATE UNIQUE INDEX IF NOT EXISTS %TS_INDEX% ON %TABLE%(ts);
 EOS
 )
 
 UPSERT_TMPL=$(
     cat <<'EOS'
--- SQLite or PostgreSQL upsert
-INSERT INTO %TABLE%(slot, ts, power_w, loadpct) VALUES(
-    %CURRENT_SLOT%, '%CURRENT_TS%', %WATTS%, %LOADPCT%
+INSERT INTO %TABLE%(slot, ts, power_w, loadpct, avg_cpu_temp_c, avg_fan_pct, avg_cpu_freq_mhz) VALUES(
+    %CURRENT_SLOT%, '%CURRENT_TS%', %WATTS%, %LOADPCT%, %AVG_CPU_TEMP_C%, %AVG_FAN_PCT%, %AVG_CPU_FREQ_MHZ%
 ) ON CONFLICT(slot) DO UPDATE SET
-    ts       = '%CURRENT_TS%',
-    power_w  = EXCLUDED.power_w,
-    loadpct  = EXCLUDED.loadpct;
+    ts               = '%CURRENT_TS%',
+    power_w          = EXCLUDED.power_w,
+    loadpct          = EXCLUDED.loadpct,
+    avg_cpu_temp_c   = EXCLUDED.avg_cpu_temp_c,
+    avg_fan_pct      = EXCLUDED.avg_fan_pct,
+    avg_cpu_freq_mhz = EXCLUDED.avg_cpu_freq_mhz;
 EOS
 )
 
 LAST_SLOT_TMPL="SELECT slot FROM %TABLE% ORDER BY ts DESC LIMIT 1;"
 
-# Determine client command and schema substitutions
 case "$DB_TYPE" in
 sqlite)
     TABLE_NAME="watts"
@@ -245,18 +492,141 @@ render_index_sql() {
         sed "s/%TABLE%/$TABLE_NAME/g; s/%TS_INDEX%/$TS_INDEX_NAME/g"
 }
 
-# Initialize schema
-INIT_SCHEMA_SQL=$(render_schema_sql)
-run_sql_command "$INIT_SCHEMA_SQL" \
-    "init-schema" \
-    log_err >/dev/null
-ENSURE_INDEXES_SQL=$(render_index_sql)
-run_sql_command "$ENSURE_INDEXES_SQL" \
-    "ensure-indexes" \
-    log_err >/dev/null
+sqlite_table_info() {
+    run_sql_command "PRAGMA table_info($TABLE_NAME);" "table-info" log_err
+}
+
+sqlite_has_column() {
+    info="$1"
+    column_name="$2"
+    printf '%s\n' "$info" | awk -F'|' -v wanted="$column_name" '$2 == wanted { found = 1 } END { exit(found ? 0 : 1) }'
+}
+
+sqlite_column_notnull() {
+    info="$1"
+    column_name="$2"
+    printf '%s\n' "$info" | awk -F'|' -v wanted="$column_name" '$2 == wanted { print $4; exit }'
+}
+
+sqlite_nullable_expr() {
+    info="$1"
+    column_name="$2"
+    if sqlite_has_column "$info" "$column_name"; then
+        printf 'CASE WHEN %s = 0 THEN NULL ELSE %s END' "$column_name" "$column_name"
+    else
+        printf 'NULL'
+    fi
+}
+
+sqlite_needs_schema_rebuild() {
+    info="$1"
+    if ! sqlite_has_column "$info" loadpct; then
+        return 0
+    fi
+    if ! sqlite_has_column "$info" avg_cpu_temp_c; then
+        return 0
+    fi
+    if ! sqlite_has_column "$info" avg_fan_pct; then
+        return 0
+    fi
+    if ! sqlite_has_column "$info" avg_cpu_freq_mhz; then
+        return 0
+    fi
+    [ "$(sqlite_column_notnull "$info" loadpct)" = "0" ] || return 0
+    [ "$(sqlite_column_notnull "$info" avg_cpu_temp_c)" = "0" ] || return 0
+    [ "$(sqlite_column_notnull "$info" avg_fan_pct)" = "0" ] || return 0
+    [ "$(sqlite_column_notnull "$info" avg_cpu_freq_mhz)" = "0" ] || return 0
+    return 1
+}
+
+ensure_sqlite_schema() {
+    init_sql=$(render_schema_sql)
+    run_sql_command "$init_sql" "init-schema" log_err >/dev/null
+
+    table_info=$(sqlite_table_info)
+    if sqlite_needs_schema_rebuild "$table_info"; then
+        if sqlite_has_column "$table_info" loadpct; then
+            loadpct_expr='loadpct'
+        else
+            loadpct_expr='NULL'
+        fi
+        temp_expr=$(sqlite_nullable_expr "$table_info" avg_cpu_temp_c)
+        fan_expr=$(sqlite_nullable_expr "$table_info" avg_fan_pct)
+        freq_expr=$(sqlite_nullable_expr "$table_info" avg_cpu_freq_mhz)
+        migration_sql=$(
+            cat <<EOS
+BEGIN IMMEDIATE;
+DROP INDEX IF EXISTS $TS_INDEX_NAME;
+ALTER TABLE $TABLE_NAME RENAME TO ${TABLE_NAME}_old;
+$(render_schema_sql)
+INSERT INTO $TABLE_NAME(slot, ts, power_w, loadpct, avg_cpu_temp_c, avg_fan_pct, avg_cpu_freq_mhz)
+SELECT slot,
+    ts,
+    power_w,
+    $loadpct_expr,
+    $temp_expr,
+    $fan_expr,
+    $freq_expr
+FROM ${TABLE_NAME}_old;
+DROP TABLE ${TABLE_NAME}_old;
+COMMIT;
+EOS
+        )
+        run_sql_command "$migration_sql" "sqlite-schema-migration" log_err >/dev/null
+        log "Migrated SQLite power logger schema for nullable aux metrics"
+    fi
+
+    index_sql=$(render_index_sql)
+    run_sql_command "$index_sql" "ensure-indexes" log_err >/dev/null
+}
+
+ensure_postgres_schema() {
+    init_sql=$(render_schema_sql)
+    run_sql_command "$init_sql" "init-schema" log_err >/dev/null
+
+    migration_sql=$(
+        cat <<EOS
+ALTER TABLE $TABLE_NAME
+    ADD COLUMN IF NOT EXISTS avg_cpu_temp_c REAL,
+    ADD COLUMN IF NOT EXISTS avg_fan_pct REAL,
+    ADD COLUMN IF NOT EXISTS avg_cpu_freq_mhz REAL;
+ALTER TABLE $TABLE_NAME
+    ALTER COLUMN loadpct DROP NOT NULL,
+    ALTER COLUMN loadpct DROP DEFAULT,
+    ALTER COLUMN avg_cpu_temp_c DROP NOT NULL,
+    ALTER COLUMN avg_cpu_temp_c DROP DEFAULT,
+    ALTER COLUMN avg_fan_pct DROP NOT NULL,
+    ALTER COLUMN avg_fan_pct DROP DEFAULT,
+    ALTER COLUMN avg_cpu_freq_mhz DROP NOT NULL,
+    ALTER COLUMN avg_cpu_freq_mhz DROP DEFAULT;
+UPDATE $TABLE_NAME
+SET avg_cpu_temp_c = NULL
+WHERE avg_cpu_temp_c = 0;
+UPDATE $TABLE_NAME
+SET avg_fan_pct = NULL
+WHERE avg_fan_pct = 0;
+UPDATE $TABLE_NAME
+SET avg_cpu_freq_mhz = NULL
+WHERE avg_cpu_freq_mhz = 0;
+EOS
+    )
+    run_sql_command "$migration_sql" "postgres-schema-migration" log_err >/dev/null
+
+    index_sql=$(render_index_sql)
+    run_sql_command "$index_sql" "ensure-indexes" log_err >/dev/null
+}
+
+case "$DB_TYPE" in
+sqlite)
+    ensure_sqlite_schema
+    ;;
+postgres)
+    ensure_postgres_schema
+    ;;
+esac
+
 log "Initialized power logger source='$POWER_SOURCE' db_type='$DB_TYPE' interval='$INTERVAL_SEC' ring_buffer_size='$RING_BUFFER_SIZE'"
 
-# Determine starting slot
 LAST_SLOT_SQL=$(render_table_sql "$LAST_SLOT_TMPL")
 LAST_SLOT=$(run_sql_command "$LAST_SLOT_SQL" "select-last-slot" log_err)
 
@@ -265,38 +635,32 @@ case "$LAST_SLOT" in
 *) CURRENT_SLOT=$(((LAST_SLOT + 1) % RING_BUFFER_SIZE)) ;;
 esac
 
-# Sampling setup
 case "$POWER_SOURCE" in
 apc)
-    # Fetch NOMPOWER once (constant for the UPS)
     while :; do
         NOMPOWER=$(apcaccess_value NOMPOWER 2>/dev/null || true)
-        case "$NOMPOWER" in
-        '' | *[!0-9.]*)
-            log_warn "invalid NOMPOWER='$NOMPOWER'. Retrying..."
-            sleep 5
-            ;;
-        *)
+        if is_number "$NOMPOWER"; then
             log "Using APC nominal power '$NOMPOWER'"
             break
-            ;;
-        esac
+        fi
+        log_warn "invalid NOMPOWER='$NOMPOWER'. Retrying..."
+        sleep 5
     done
     ;;
-ipmi) ;;
+ipmi)
+    ;;
 *)
     log_err "unsupported POWER_SOURCE='$POWER_SOURCE'"
     exit 1
     ;;
 esac
 
+detect_os_name
 detect_date_epoch_mode
 next_tick=$(($(date -u +%s) + INTERVAL_SEC))
+LOADPCT_SQL='NULL'
 
 while :; do
-    # Wait for the next scheduled whole-second sample boundary. If a prior
-    # iteration ran long, skip missed intervals instead of catching up inside
-    # the same wall-clock second.
     while :; do
         now=$(date -u +%s)
         [ "$now" -ge "$next_tick" ] && break
@@ -310,29 +674,62 @@ while :; do
     case "$POWER_SOURCE" in
     apc)
         LOADPCT=$(apcaccess_value LOADPCT 2>/dev/null || true)
-        case "$LOADPCT" in
-        '' | *[!0-9.]*)
+        if ! is_number "$LOADPCT"; then
             log_warn "invalid LOADPCT='$LOADPCT'"
             continue
-            ;;
-        esac
+        fi
         WATTS=$(printf '%s\n' "$LOADPCT * $NOMPOWER / 100" | bc -l)
+        LOADPCT_SQL=$LOADPCT
+        AVG_FAN_PCT=""
         ;;
     ipmi)
-        LOADPCT="0"
-        WATTS=$(ipmi_power_meter 2>/dev/null || true)
+        LOADPCT_SQL='NULL'
+        if ! IPMI_OUTPUT=$(read_ipmi_helper_output 2>/dev/null); then
+            log_warn "ipmi helper failed"
+            continue
+        fi
+        WATTS=$(printf '%s\n' "$IPMI_OUTPUT" | helper_value power_w)
+        AVG_FAN_PCT=$(printf '%s\n' "$IPMI_OUTPUT" | helper_value avg_fan_pct)
         ;;
     esac
 
-    case "$WATTS" in
-    '' | *[!0-9.]*)
+    if ! is_number "$WATTS"; then
         log_warn "invalid watts='$WATTS'"
         continue
-        ;;
-    esac
+    fi
+
+    AVG_CPU_TEMP_C=$(avg_cpu_temp_c || true)
+    if [ -n "$AVG_CPU_TEMP_C" ] && ! is_number "$AVG_CPU_TEMP_C"; then
+        log_warn "invalid avg cpu temp='$AVG_CPU_TEMP_C'"
+        AVG_CPU_TEMP_C=""
+    fi
+
+    if [ -n "$AVG_FAN_PCT" ] && ! is_number "$AVG_FAN_PCT"; then
+        log_warn "invalid avg fan pct='$AVG_FAN_PCT'"
+        AVG_FAN_PCT=""
+    fi
+
+    AVG_CPU_FREQ_MHZ=$(avg_cpu_freq_mhz || true)
+    if [ -n "$AVG_CPU_FREQ_MHZ" ] && ! is_number "$AVG_CPU_FREQ_MHZ"; then
+        log_warn "invalid avg cpu freq mhz='$AVG_CPU_FREQ_MHZ'"
+        AVG_CPU_FREQ_MHZ=""
+    fi
+
+    AVG_CPU_TEMP_C_SQL=$(sql_numeric_or_null "$AVG_CPU_TEMP_C") || {
+        log_warn "failed to render avg cpu temp for SQL"
+        continue
+    }
+    AVG_FAN_PCT_SQL=$(sql_numeric_or_null "$AVG_FAN_PCT") || {
+        log_warn "failed to render avg fan pct for SQL"
+        continue
+    }
+    AVG_CPU_FREQ_MHZ_SQL=$(sql_numeric_or_null "$AVG_CPU_FREQ_MHZ") || {
+        log_warn "failed to render avg cpu freq for SQL"
+        continue
+    }
 
     UPSERT_SQL=$(printf '%s\n' "$UPSERT_TMPL" |
-        sed "s/%TABLE%/$TABLE_NAME/g; s/%CURRENT_SLOT%/$CURRENT_SLOT/; s/%CURRENT_TS%/$CURRENT_TS/; s/%WATTS%/$WATTS/; s/%LOADPCT%/$LOADPCT/")
+        sed "s/%TABLE%/$TABLE_NAME/g; s/%CURRENT_SLOT%/$CURRENT_SLOT/; s/%CURRENT_TS%/$CURRENT_TS/; s/%WATTS%/$WATTS/; s/%LOADPCT%/$LOADPCT_SQL/; s/%AVG_CPU_TEMP_C%/$AVG_CPU_TEMP_C_SQL/; s/%AVG_FAN_PCT%/$AVG_FAN_PCT_SQL/; s/%AVG_CPU_FREQ_MHZ%/$AVG_CPU_FREQ_MHZ_SQL/")
     if ! run_sql_command "$UPSERT_SQL" "write-sample" log_err >/dev/null; then
         continue
     fi
