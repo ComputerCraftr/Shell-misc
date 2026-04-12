@@ -1,0 +1,4 @@
+Defaults:power-logger secure_path="/usr/local/libexec:/usr/local/bin:/usr/bin:/bin"
+
+# Keep this as one exact command for sudo-rs/sudoers literal argv matching.
+power-logger ALL = (root) NOPASSWD:/usr/local/libexec/power-logger-ipmi-readings

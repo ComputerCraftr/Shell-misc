@@ -1,0 +1,133 @@
+#!/bin/sh
+set -eu
+
+PATH='/usr/local/bin:/usr/bin:/bin'
+
+POWER_SENSOR_NAME='Power Meter'
+FAN_SENSOR_PREFIX='Fan Block '
+
+if [ "$#" -ne 0 ]; then
+    printf 'usage: %s\n' "$0" >&2
+    exit 64
+fi
+
+OS_NAME=$(uname -s 2>/dev/null || printf 'unknown')
+case "$OS_NAME" in
+FreeBSD)
+    CONFIG_FILE='/usr/local/etc/power-logger-ipmi.conf'
+    ;;
+Linux)
+    CONFIG_FILE='/etc/power-logger-ipmi.conf'
+    ;;
+*)
+    printf 'unsupported OS for config path resolution: %s\n' "$OS_NAME" >&2
+    exit 1
+    ;;
+esac
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    printf 'missing helper config file: %s\n' "$CONFIG_FILE" >&2
+    exit 66
+fi
+
+saw_power_sensor_name=false
+saw_fan_sensor_prefix=false
+
+while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+    line=$raw_line
+    case "$line" in
+    '' | '#'*)
+        continue
+        ;;
+    esac
+
+    case "$line" in
+    *=*)
+        key=${line%%=*}
+        value=${line#*=}
+        ;;
+    *)
+        printf 'invalid config line in %s: %s\n' "$CONFIG_FILE" "$line" >&2
+        exit 65
+        ;;
+    esac
+
+    case "$key" in
+    POWER_SENSOR_NAME)
+        [ "$saw_power_sensor_name" = false ] || {
+            printf 'duplicate key POWER_SENSOR_NAME in %s\n' "$CONFIG_FILE" >&2
+            exit 65
+        }
+        [ -n "$value" ] || {
+            printf 'empty value for POWER_SENSOR_NAME in %s\n' "$CONFIG_FILE" >&2
+            exit 65
+        }
+        POWER_SENSOR_NAME=$value
+        saw_power_sensor_name=true
+        ;;
+    FAN_SENSOR_PREFIX)
+        [ "$saw_fan_sensor_prefix" = false ] || {
+            printf 'duplicate key FAN_SENSOR_PREFIX in %s\n' "$CONFIG_FILE" >&2
+            exit 65
+        }
+        [ -n "$value" ] || {
+            printf 'empty value for FAN_SENSOR_PREFIX in %s\n' "$CONFIG_FILE" >&2
+            exit 65
+        }
+        FAN_SENSOR_PREFIX=$value
+        saw_fan_sensor_prefix=true
+        ;;
+    *)
+        printf 'unknown key %s in %s\n' "$key" "$CONFIG_FILE" >&2
+        exit 65
+        ;;
+    esac
+done <"$CONFIG_FILE"
+
+if [ -x /usr/local/bin/ipmitool ]; then
+    IPMITOOL_BIN=/usr/local/bin/ipmitool
+elif [ -x /usr/bin/ipmitool ]; then
+    IPMITOOL_BIN=/usr/bin/ipmitool
+else
+    printf 'ipmitool not found\n' >&2
+    exit 127
+fi
+
+if ! SDR_OUTPUT=$("$IPMITOOL_BIN" sdr 2>/dev/null); then
+    printf 'ipmitool sdr failed\n' >&2
+    exit 1
+fi
+
+POWER_W=$(printf '%s\n' "$SDR_OUTPUT" | awk -F'|' -v power_sensor_name="$POWER_SENSOR_NAME" '
+    {
+        sensor = $1
+        value = $2
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", sensor)
+        gsub(/[^0-9.]/, "", value)
+        if (sensor == power_sensor_name && value != "") {
+            print value
+            exit
+        }
+    }
+')
+
+AVG_FAN_PCT=$(printf '%s\n' "$SDR_OUTPUT" | awk -F'|' -v fan_sensor_prefix="$FAN_SENSOR_PREFIX" '
+    {
+        sensor = $1
+        value = $2
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", sensor)
+        gsub(/[^0-9.]/, "", value)
+        if (sensor ~ ("^" fan_sensor_prefix "[[:space:]]*[0-9]+$") && value != "") {
+            sum += value
+            n++
+        }
+    }
+    END {
+        if (n > 0) {
+            printf "%.2f\n", sum / n
+        }
+    }
+')
+
+printf 'power_w=%s\n' "$POWER_W"
+printf 'avg_fan_pct=%s\n' "$AVG_FAN_PCT"
