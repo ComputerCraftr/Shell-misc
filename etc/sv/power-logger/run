@@ -655,7 +655,6 @@ ipmi)
     ;;
 esac
 
-detect_os_name
 detect_date_epoch_mode
 next_tick=$(($(date -u +%s) + INTERVAL_SEC))
 LOADPCT_SQL='NULL'
