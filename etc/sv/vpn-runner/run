@@ -96,6 +96,7 @@ while [ -n "$CANDIDATE_LINES" ]; do
     log "Restarting dhclient on '$EXT_IF_NEW'"
     if ! timeout -f "$GATEWAY_TIMEOUT" service "$DHCLIENT_SERVICE" restart "$EXT_IF_NEW"; then
         log_err "DHCP restart failed on $EXT_IF_NEW; trying another interface."
+        ifconfig "$EXT_IF_NEW" -alias
         remove_current
         continue
     fi
@@ -130,7 +131,7 @@ if [ -z "$DEFAULT_GW_IPV4" ]; then
     exit 1
 fi
 
-if ! timeout "$PROXY_PROBE_TIMEOUT" nc -z -4 "$DEFAULT_GW_IPV4" "$PROXY_PROBE_PORT" >/dev/null 2>&1; then
+if ! nc -w "$PROXY_PROBE_TIMEOUT" -4 -z "$DEFAULT_GW_IPV4" "$PROXY_PROBE_PORT" >/dev/null 2>&1; then
     # Connect directly to the server.
     OVPN_PROXY_PORT=0
     log "Proxy port probe failed for gateway '$DEFAULT_GW_IPV4'; using direct OpenVPN connection"

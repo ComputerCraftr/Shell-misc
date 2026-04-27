@@ -8,10 +8,17 @@ ACTIVE_RESOLV_CONF=/etc/resolv.conf
 ENV_CONF=/usr/local/etc/.gateway-env.conf
 LOCK_DIR=/var/run
 IPFW_SERVICE=ipfw
-EXTERNAL_IP_URL=https://ifconfig.co
-DISCORD_RETRY_COUNT=5
-DISCORD_RETRY_DELAY=5
-DISCORD_IP_FAMILY=-4
+# Prefer DNS-based detection (UDP) over HTTPS (TCP)
+EXTERNAL_IP_METHOD=opendns
+OUTBOUND_IP_FAMILY=4
+OUTBOUND_RETRY_COUNT=5
+OUTBOUND_RETRY_DELAY=5
+
+# Outbound connection settings for curl/dig
+CURL_IP_FAMILY="-${OUTBOUND_IP_FAMILY}"
+DIG_IP_FAMILY="-${OUTBOUND_IP_FAMILY}"
+DIG_TIMEOUT="$OUTBOUND_RETRY_DELAY"
+DIG_TRIES="$OUTBOUND_RETRY_COUNT"
 
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/common.sh"
@@ -158,8 +165,8 @@ send_discord() {
     msg="$1"
     payload=$(json_escape "${DISCORD_MENTION} ${msg}")
     log "Sending Discord notification with the following message: $msg"
-    curl -s --retry "$DISCORD_RETRY_COUNT" --retry-delay "$DISCORD_RETRY_DELAY" \
-        "$DISCORD_IP_FAMILY" -X POST -H "Content-Type: application/json" \
+    curl -s --retry "$OUTBOUND_RETRY_COUNT" --retry-delay "$OUTBOUND_RETRY_DELAY" \
+        "$CURL_IP_FAMILY" -X POST -H "Content-Type: application/json" \
         -d "{\"content\": \"${payload}\"}" \
         "$WEBHOOK_URL"
     log "Notification sent successfully."
@@ -239,11 +246,41 @@ BAD_IPV4_REGEX="^(""\
 0\\.$OCTET\\.$OCTET\\.$OCTET|""\
 100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.$OCTET\\.$OCTET|""\
 255\\.255\\.255\\.255|""\
-102\\.129\\.252\\.$OCTET""\
 )\$"
 
-# Get external IPv4 address
-EXT_IPV4=$(curl -s --retry 5 --retry-delay 5 -4 "$EXTERNAL_IP_URL")
+# Normalize dig/curl output to a single IPv4, stripping quotes and trailing junk
+normalize_ipv4_output() {
+    sed 's/"//g' | awk '
+        NF == 1 && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { ip = $1 }
+        END { if (ip != "") print ip }
+    '
+}
+
+# Get external IPv4 address using DNS
+case "$EXTERNAL_IP_METHOD" in
+opendns)
+    EXT_IPV4=$(dig +timeout="$DIG_TIMEOUT" +tries="$DIG_TRIES" +short +search=0 +comments=0 +stats=0 "$DIG_IP_FAMILY" \
+        myip.opendns.com @resolver1.opendns.com | normalize_ipv4_output)
+    ;;
+google)
+    EXT_IPV4=$(dig +timeout="$DIG_TIMEOUT" +tries="$DIG_TRIES" +short +search=0 +comments=0 +stats=0 "$DIG_IP_FAMILY" \
+        TXT o-o.myaddr.l.google.com @ns1.google.com | normalize_ipv4_output)
+    ;;
+akamai)
+    EXT_IPV4=$(dig +timeout="$DIG_TIMEOUT" +tries="$DIG_TRIES" +short +search=0 +comments=0 +stats=0 "$DIG_IP_FAMILY" \
+        whoami.akamai.net @ns1-1.akamaitech.net | normalize_ipv4_output)
+    ;;
+*)
+    EXT_IPV4=""
+    ;;
+esac
+
+# Fallback to curl only if DNS detection fails
+if [ -z "$EXT_IPV4" ]; then
+    log "DNS IP detection failed, falling back to HTTPS"
+    EXT_IPV4=$(curl -s --retry "$OUTBOUND_RETRY_COUNT" --retry-delay "$OUTBOUND_RETRY_DELAY" \
+        "$CURL_IP_FAMILY" https://ifconfig.co | normalize_ipv4_output)
+fi
 
 # Check for invalid/missing/bad external IP
 if [ -z "$EXT_IPV4" ] ||
@@ -261,7 +298,8 @@ EXT_IPV4_UPDATE=""
 # Bring up IPv6 gateway tunnel if available.
 if [ -n "$EXT_IPV4" ] && [ -n "$GIF_IF" ] && [ -n "$INT_IF" ] && [ -n "$GIF_UPDATE_URL" ]; then
     # Update the external IP.
-    EXT_IPV4_UPDATE=$(curl -s --retry 5 --retry-delay 5 -4 -X GET \
+    EXT_IPV4_UPDATE=$(curl -s --retry "$OUTBOUND_RETRY_COUNT" --retry-delay "$OUTBOUND_RETRY_DELAY" \
+        "$CURL_IP_FAMILY" -X GET \
         -H "Cache-Control: no-cache, no-store, must-revalidate" \
         "$GIF_UPDATE_URL&myip=$EXT_IPV4")
     log "6in4 update response: '$EXT_IPV4_UPDATE'"
